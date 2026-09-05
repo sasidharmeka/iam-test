@@ -5,7 +5,7 @@
 | Layer | Responsibility | May write? |
 |---|---|---:|
 | `IAM_NEW_1` | Ingest events, run Spark detections, build BigQuery analytics | BigQuery only |
-| Google Chat + FastAPI | Accept user requests and approval clicks | No IAM systems |
+| Gmail web UI / Google Chat + FastAPI | Accept user requests and approval clicks | No IAM systems |
 | Authorization | Map actor role/scope and target hierarchy | No |
 | IAM orchestrator | Collect evidence and coordinate Gemini agents | Action proposal only |
 | Cloud SQL | Operational action state, decisions, audit, simulated state | Yes |
@@ -19,8 +19,8 @@ separate prevents chat retries or agent reasoning from mutating analytics.
 
 ```mermaid
 sequenceDiagram
-    participant U as Chat user
-    participant C as Chat/FastAPI
+    participant U as Authenticated user
+    participant C as Web/Chat + FastAPI
     participant O as IAM orchestrator
     participant B as BigQuery
     participant A as Gemini agents
@@ -28,7 +28,7 @@ sequenceDiagram
 
     U->>C: Investigate user12
     C->>C: Authenticate and authorize
-    C->>O: Actor, target, Chat event ID
+    C->>O: Actor, target, source event ID
     O->>Q: Check event idempotency
     O->>B: Parameterized identity evidence query
     B-->>O: Risk, timeline, findings
@@ -54,7 +54,7 @@ concurrency for latency; it is not a set of long-running agent threads or micros
 ```mermaid
 sequenceDiagram
     participant H as Human approver
-    participant C as Google Chat
+    participant C as Web UI or Google Chat
     participant G as Approval gateway
     participant Q as Cloud SQL
     participant T as Deterministic tool
@@ -101,7 +101,8 @@ the model to treat retrieved values as data rather than instructions.
 
 ## Authorization hierarchy
 
-`config/authorization.yaml` assigns every Chat principal a role and a scope. An actor may
+`config/authorization.yaml` or the deployed principal variables assign every user a role and
+a scope. An actor may
 act only when their scope is an ancestor of the target identity's path from
 `config/identities.yaml`.
 
@@ -129,10 +130,12 @@ filter.
 
 ## Trust boundaries
 
-- Cloud Run verifies the Google-signed request before FastAPI handles it when the service
-  is private and `chat@system.gserviceaccount.com` is the invoker.
-- The event's Workspace user is then authorized separately. Request authentication does
-  not imply user permission.
+- The HTTPS service is reachable so the browser can load its sign-in page. FastAPI verifies
+  a Google Identity Services ID token on every browser message or decision request.
+- The Google Chat endpoint separately verifies the token issued to
+  `chat@system.gserviceaccount.com` for its exact endpoint audience.
+- The verified browser email or Chat event user is authorized separately. Request
+  authentication does not imply user permission.
 - BigQuery credentials are read-only for data; Cloud SQL credentials own action state.
 - The LLM cannot submit SQL, decide approval, change an existing plan, or invoke IAM tools.
 - Group/entitlement operations are rejected unless their exact resource is present in the

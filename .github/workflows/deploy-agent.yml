@@ -1,0 +1,209 @@
+name: Deploy IAM Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub Environment containing the deployment configuration
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+concurrency:
+  group: deploy-iam-agent-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Validate and deploy to Cloud Run
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: ${{ inputs.environment }}
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+      WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+      DEPLOY_SERVICE_ACCOUNT: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+      RUNTIME_SERVICE_ACCOUNT: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
+      CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'iam-agent' }}
+      CLOUD_SQL_INSTANCE: ${{ vars.CLOUD_SQL_INSTANCE }}
+      DATABASE_SECRET: ${{ vars.DATABASE_SECRET || 'IAM_AGENT_DATABASE_URL' }}
+      GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'us-central1' }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
+      BIGQUERY_PROJECT: ${{ vars.BIGQUERY_PROJECT }}
+      BIGQUERY_DATASET: ${{ vars.BIGQUERY_DATASET }}
+      BIGQUERY_ROWS_PER_TABLE: ${{ vars.BIGQUERY_ROWS_PER_TABLE || '5' }}
+      CHAT_ANALYST_PRINCIPALS: ${{ vars.CHAT_ANALYST_PRINCIPALS }}
+      CHAT_APPROVER_PRINCIPALS: ${{ vars.CHAT_APPROVER_PRINCIPALS }}
+      CHAT_ADMIN_PRINCIPALS: ${{ vars.CHAT_ADMIN_PRINCIPALS }}
+      CHAT_DEFAULT_SCOPE: ${{ vars.CHAT_DEFAULT_SCOPE || '/company' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install validation dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run offline validation
+        run: |
+          python -m compileall -q iam_agent main.py
+          ruff check iam_agent tests main.py
+          python -m pytest -q
+
+      - name: Validate GitHub Environment variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            GCP_PROJECT_ID
+            WIF_PROVIDER
+            DEPLOY_SERVICE_ACCOUNT
+            RUNTIME_SERVICE_ACCOUNT
+            CLOUD_SQL_INSTANCE
+            DATABASE_SECRET
+            BIGQUERY_PROJECT
+            BIGQUERY_DATASET
+            CHAT_ANALYST_PRINCIPALS
+            CHAT_APPROVER_PRINCIPALS
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Set ${name} in the '${{ inputs.environment }}' GitHub Environment."
+              exit 1
+            fi
+          done
+
+          if [[ ! "${GCP_PROJECT_ID}" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
+            echo "::error::GCP_PROJECT_ID is not a valid Google Cloud project ID."
+            exit 1
+          fi
+          if [[ ! "${BIGQUERY_DATASET}" =~ ^[A-Za-z_][A-Za-z0-9_]{0,1023}$ ]]; then
+            echo "::error::BIGQUERY_DATASET must contain only letters, digits, and underscores."
+            exit 1
+          fi
+          if [[ ! "${BIGQUERY_ROWS_PER_TABLE}" =~ ^[0-9]+$ ]] \
+            || (( BIGQUERY_ROWS_PER_TABLE < 1 || BIGQUERY_ROWS_PER_TABLE > 50 )); then
+            echo "::error::BIGQUERY_ROWS_PER_TABLE must be an integer from 1 through 50."
+            exit 1
+          fi
+
+          IFS=: read -r sql_project sql_region sql_instance sql_extra <<< "${CLOUD_SQL_INSTANCE}"
+          if [[ -z "${sql_project}" || -z "${sql_region}" || -z "${sql_instance}" \
+            || -n "${sql_extra:-}" ]]; then
+            echo "::error::CLOUD_SQL_INSTANCE must be PROJECT:REGION:INSTANCE."
+            exit 1
+          fi
+          if [[ "${sql_project}" != "${GCP_PROJECT_ID}" ]]; then
+            echo "::error::The Cloud SQL project must match GCP_PROJECT_ID."
+            exit 1
+          fi
+          if [[ "${sql_region}" != "${GCP_REGION}" ]]; then
+            echo "::error::Cloud SQL and Cloud Run must use the same region for this demo."
+            exit 1
+          fi
+          if [[ "${CHAT_ANALYST_PRINCIPALS}" == "${CHAT_APPROVER_PRINCIPALS}" ]]; then
+            echo "::warning::Use different analyst and approver accounts for separation of duties."
+          fi
+
+      - name: Authenticate to Google Cloud with WIF
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Enable required APIs
+        run: |
+          gcloud services enable \
+            aiplatform.googleapis.com \
+            artifactregistry.googleapis.com \
+            bigquery.googleapis.com \
+            chat.googleapis.com \
+            cloudbuild.googleapis.com \
+            run.googleapis.com \
+            secretmanager.googleapis.com \
+            sqladmin.googleapis.com \
+            --project="${GCP_PROJECT_ID}" \
+            --quiet
+
+      - name: Check referenced Cloud resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          sql_instance="${CLOUD_SQL_INSTANCE##*:}"
+          gcloud iam service-accounts describe "${RUNTIME_SERVICE_ACCOUNT}" \
+            --project="${GCP_PROJECT_ID}" >/dev/null
+          gcloud sql instances describe "${sql_instance}" \
+            --project="${GCP_PROJECT_ID}" >/dev/null
+          gcloud secrets describe "${DATABASE_SECRET}" \
+            --project="${GCP_PROJECT_ID}" >/dev/null
+
+      - name: Deploy private Cloud Run service
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run deploy "${CLOUD_RUN_SERVICE}" \
+            --source=. \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --service-account="${RUNTIME_SERVICE_ACCOUNT}" \
+            --execution-environment=gen2 \
+            --port=8080 \
+            --cpu=1 \
+            --memory=512Mi \
+            --concurrency=10 \
+            --timeout=300 \
+            --min=0 \
+            --max=1 \
+            --no-allow-unauthenticated \
+            --add-cloudsql-instances="${CLOUD_SQL_INSTANCE}" \
+            --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}|GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION}|GEMINI_MODEL=${GEMINI_MODEL}|BIGQUERY_PROJECT=${BIGQUERY_PROJECT}|BIGQUERY_DATASET=${BIGQUERY_DATASET}|BIGQUERY_ROWS_PER_TABLE=${BIGQUERY_ROWS_PER_TABLE}|VERIFY_GOOGLE_CHAT_TOKEN=false|CHAT_ANALYST_PRINCIPALS=${CHAT_ANALYST_PRINCIPALS}|CHAT_APPROVER_PRINCIPALS=${CHAT_APPROVER_PRINCIPALS}|CHAT_ADMIN_PRINCIPALS=${CHAT_ADMIN_PRINCIPALS}|CHAT_DEFAULT_SCOPE=${CHAT_DEFAULT_SCOPE}" \
+            --set-secrets="DATABASE_URL=${DATABASE_SECRET}:latest" \
+            --quiet
+
+      - name: Allow authenticated Google Chat delivery
+        run: |
+          gcloud run services add-iam-policy-binding "${CLOUD_RUN_SERVICE}" \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --member="serviceAccount:chat@system.gserviceaccount.com" \
+            --role="roles/run.invoker" \
+            --quiet
+
+      - name: Show endpoint and next step
+        shell: bash
+        run: |
+          set -euo pipefail
+          service_url="$(gcloud run services describe "${CLOUD_RUN_SERVICE}" \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --format='value(status.url)')"
+          {
+            echo "## IAM Agent deployed"
+            echo
+            echo "Cloud Run service: ${service_url}"
+            echo
+            echo "Google Chat HTTP endpoint: ${service_url}/google-chat/events"
+            echo
+            echo "Register that endpoint in Google Chat API > Configuration."
+          } >> "${GITHUB_STEP_SUMMARY}"

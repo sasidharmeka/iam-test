@@ -1,0 +1,14 @@
+# Replace these example principals with your Google Workspace user emails.
+principals:
+  - principal: iam.analyst@example.com
+    role: analyst
+    scope: /company
+  - principal: finance.approver@example.com
+    role: approver
+    scope: /company/finance
+  - principal: security.approver@example.com
+    role: approver
+    scope: /company
+  - principal: iam.admin@example.com
+    role: admin
+    scope: /

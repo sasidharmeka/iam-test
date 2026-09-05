@@ -1,4 +1,4 @@
-# One-click deployment and Google Chat setup
+# One-click deployment, Gmail sign-in, and Google Chat setup
 
 This guide deploys the IAM agent from the GitHub **Actions** tab. The upstream
 `IAM_NEW_1` repository remains responsible for refreshing the BigQuery analytics tables.
@@ -12,10 +12,11 @@ This guide deploys the IAM agent from the GitHub **Actions** tab. The upstream
 3. authenticates to Google Cloud using Workload Identity Federation (WIF);
 4. enables the required Google Cloud APIs;
 5. confirms that the runtime service account, Cloud SQL instance, and database secret exist;
-6. builds and deploys a private Cloud Run service with scale-to-zero and a maximum of one instance;
-7. injects the BigQuery, Gemini, Chat authorization, and Cloud SQL configuration;
-8. grants only Google Chat's service agent permission to invoke the service; and
-9. prints the Google Chat HTTP endpoint in the workflow summary.
+6. builds and deploys a scale-to-zero Cloud Run service with a maximum of one instance;
+7. injects the BigQuery, Gemini, Gmail/Chat authorization, and Cloud SQL configuration;
+8. makes the HTTPS service reachable so the Google sign-in page can load, while requiring
+   Google-signed tokens inside every message and approval endpoint; and
+9. prints both the Gmail web URL and Google Chat endpoint in the workflow summary.
 
 The workflow never creates or deletes a Cloud SQL instance and never prints the database URL.
 
@@ -36,7 +37,7 @@ Reuse means that both repositories use the same identity bridge. The provider or
 binding must also trust this repository:
 
 ```text
-sasidharmeka/multi-agent-demo
+sasidharmeka/multi-agent-iam-demo
 ```
 
 If the provider maps `attribute.repository`, an administrator can add the repository-specific
@@ -46,15 +47,15 @@ binding to the deployment service account:
 gcloud iam service-accounts add-iam-policy-binding DEPLOY_SERVICE_ACCOUNT \
   --project=rapid-stage-506406-t4 \
   --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/427442249843/locations/global/workloadIdentityPools/github-actions/attribute.repository/sasidharmeka/multi-agent-demo"
+  --member="principalSet://iam.googleapis.com/projects/427442249843/locations/global/workloadIdentityPools/github-actions/attribute.repository/sasidharmeka/multi-agent-iam-demo"
 ```
 
 If the provider itself has a condition that permits only `sasidharmeka/IAM_NEW_1`, update that
 condition to permit both repositories. Adding a service-account binding cannot override a
 provider-level condition.
 
-For source deployments and the automatic Google Chat invoker binding, the deployment service
-account needs these project roles:
+For source deployments and publishing the browser endpoint, the deployment service account
+needs these project roles:
 
 ```text
 roles/run.admin
@@ -65,9 +66,11 @@ roles/cloudsql.viewer
 roles/secretmanager.viewer
 ```
 
-It also needs `roles/iam.serviceAccountUser` on the runtime service account. Google Cloud's
-default build service account (`PROJECT_NUMBER-compute@developer.gserviceaccount.com`) needs
-`roles/run.builder` for `gcloud run deploy --source`.
+It also needs `roles/iam.serviceAccountUser` on both the runtime service account and the
+Cloud Build service account. Google Cloud's default build service account
+(`PROJECT_NUMBER-compute@developer.gserviceaccount.com` in newer projects) needs
+`roles/run.builder` for `gcloud run deploy --source`. Confirm the account selected for the
+project with `gcloud builds get-default-service-account`.
 
 ### 2. Cloud Run runtime service account
 
@@ -123,7 +126,7 @@ Secret Manager Secret Accessor on this secret.
 
 ## GitHub Environment variables
 
-Open the `multi-agent-demo` repository and go to:
+Open the `multi-agent-iam-demo` repository and go to:
 
 **Settings > Environments > New environment > `dev`**
 
@@ -144,13 +147,23 @@ Create these environment variables:
 | `BIGQUERY_PROJECT` | `rapid-stage-506406-t4` | Yes |
 | `BIGQUERY_DATASET` | `iam_data_dev` | Yes |
 | `BIGQUERY_ROWS_PER_TABLE` | `5` | No; valid range is 1-50 |
-| `CHAT_ANALYST_PRINCIPALS` | `analyst@yourdomain.com` | Yes |
-| `CHAT_APPROVER_PRINCIPALS` | `approver@yourdomain.com` | Yes |
+| `WEB_GOOGLE_CLIENT_ID` | `123456-abc.apps.googleusercontent.com` | Yes |
+| `WEB_ANALYST_PRINCIPALS` | `your.personal.account@gmail.com` | Yes |
+| `WEB_APPROVER_PRINCIPALS` | `second.account@gmail.com` | No; needed to approve |
+| `WEB_ADMIN_PRINCIPALS` | `admin.account@gmail.com` | No |
+| `CHAT_ANALYST_PRINCIPALS` | `analyst@yourdomain.com` | No |
+| `CHAT_APPROVER_PRINCIPALS` | `approver@yourdomain.com` | No |
 | `CHAT_ADMIN_PRINCIPALS` | `admin@yourdomain.com` | No |
 | `CHAT_DEFAULT_SCOPE` | `/company` | No; defaults to this value |
 
-Multiple Chat principals are comma-separated. Use different accounts for the requester and
-approver because the approval gateway rejects self-approval.
+All principal lists accept comma-separated email addresses. A personal `@gmail.com` address is
+valid in the `WEB_*` variables. Use a different account for approval because the approval
+gateway rejects self-approval. An approver can also run investigations, so for a simple demo
+you can leave `WEB_ANALYST_PRINCIPALS` as your first Gmail account and put a second Gmail
+account only in `WEB_APPROVER_PRINCIPALS`.
+
+`WEB_GOOGLE_CLIENT_ID` is an identifier, not a secret. Do not add the OAuth client secret to
+GitHub; this web sign-in flow does not use it.
 
 WIF does not require a JSON service-account key, so do not create a `GCP_SA_KEY` secret. The
 database URL stays in Google Secret Manager, not GitHub Secrets.
@@ -162,18 +175,61 @@ before GitHub displays its **Run workflow** button.
 
 1. Run the `IAM_NEW_1` **full-pipeline** workflow and confirm that it populated
    `rapid-stage-506406-t4.iam_data_dev`.
-2. Open **multi-agent-demo > Actions > Deploy IAM Agent**.
+2. Open **multi-agent-iam-demo > Actions > Deploy IAM Agent**.
 3. Click **Run workflow**.
 4. Select `dev` and confirm.
-5. When it completes, open its job summary and copy the displayed Google Chat HTTP endpoint.
+5. When it completes, open its job summary and copy the displayed web interface and Google
+   Chat endpoint URLs.
 
 The deployment action is needed only for the first deployment and later code/configuration
-changes. A Chat message wakes the scale-to-zero Cloud Run service; it does not require another
-GitHub workflow run.
+changes. A browser or Chat request wakes the scale-to-zero Cloud Run service; it does not
+require another GitHub workflow run.
+
+## Configure personal Gmail sign-in
+
+This path does not depend on your school Workspace administrator or Google Chat app discovery.
+
+1. Find the base Cloud Run URL from the successful workflow summary. Because your `iam-agent`
+   service already exists, you can also obtain it in Cloud Shell:
+
+   ```bash
+   gcloud run services describe iam-agent \
+     --project=rapid-stage-506406-t4 \
+     --region=us-central1 \
+     --format='value(status.url)'
+   ```
+
+2. In the same Google Cloud project, open **Google Auth Platform > Branding**. Complete the
+   app name, user support email, and developer contact information.
+3. Open **Audience**, select **External**, leave the app in testing for the demo, and add each
+   personal Gmail account as a test user.
+4. Open **Clients > Create client > Web application**.
+5. Under **Authorized JavaScript origins**, paste the exact base Cloud Run URL, such as
+   `https://iam-agent-abc-uc.a.run.app`. Use only the scheme and host: no trailing slash and no
+   `/google-chat/events` path. No redirect URI is required.
+6. Copy the client ID ending in `.apps.googleusercontent.com` into the GitHub Environment
+   variable `WEB_GOOGLE_CLIENT_ID`. Put your Gmail address in `WEB_ANALYST_PRINCIPALS`.
+7. Run **Actions > Deploy IAM Agent** again, then open the base Cloud Run URL from the job
+   summary and click **Sign in with Google**.
+
+For a brand-new service with no URL yet, create the web client with
+`http://localhost:8080` as a temporary authorized JavaScript origin, deploy once, then replace
+that origin with the printed Cloud Run URL and redeploy if you changed the client ID.
+
+Test with:
+
+```text
+help
+investigate user1
+```
+
+The browser sends the Google ID token only in memory; the backend verifies its signature,
+audience, expiry, and verified email before mapping that email to the configured role.
 
 ## Register the Google Chat application
 
-Google Chat registration is a one-time console operation:
+This section is optional when you use only the Gmail web interface. Google Chat registration
+is a one-time console operation:
 
 1. In project `rapid-stage-506406-t4`, open **APIs & Services > Google Chat API > Configuration**.
 2. Set the app name, avatar URL, and description.
@@ -221,12 +277,15 @@ It would still require a Cloud SQL database because WIF cannot store rows.
 
 | Failure | Meaning |
 | --- | --- |
-| `iam.serviceAccounts.getAccessToken denied` | WIF or the deployment-service-account binding does not trust `sasidharmeka/multi-agent-demo`. |
+| `iam.serviceAccounts.getAccessToken denied` | WIF or the deployment-service-account binding does not trust `sasidharmeka/multi-agent-iam-demo`. |
 | `iam.serviceAccounts.actAs denied` | The deployer lacks Service Account User on the runtime service account. |
-| `run.services.setIamPolicy denied` | The deployer cannot grant Google Chat the Cloud Run Invoker role. |
+| `run.services.update denied` | The deployer lacks Cloud Run Admin or an organization policy blocks public HTTPS access. |
 | Cloud Build permission error | The default build service account lacks `roles/run.builder`. |
 | Secret not found/access denied | `DATABASE_SECRET` is wrong or the runtime account lacks Secret Accessor. |
 | Cloud SQL connection error | The connection name, database URL, database user, or password is incorrect. |
 | BigQuery table not found | Run the full `IAM_NEW_1` pipeline or correct `BIGQUERY_PROJECT`/`BIGQUERY_DATASET`. |
 | `You are not authorized` | The Chat sender's exact Workspace email is absent from the Chat principal variables. |
 | App cannot be found in Chat | Add the user under Chat API Visibility and set the app status to Live. |
+| `The given origin is not allowed` | Add the exact base Cloud Run URL to the web client's Authorized JavaScript origins. |
+| Gmail sign-in works but agent says unauthorized | Add that exact Gmail address to a `WEB_*_PRINCIPALS` variable and redeploy. |
+| Gmail account is blocked during sign-in | Use an External OAuth audience and add the Gmail address as a test user. |

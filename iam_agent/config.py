@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     google_chat_audience: str | None = None
     google_chat_service_account: str = "chat@system.gserviceaccount.com"
 
+    # Optional browser UI. The Cloud Run service may be publicly reachable only
+    # when every state-changing web route verifies a Google Identity Services
+    # ID token against this OAuth client ID.
+    enable_web_ui: bool = False
+    web_google_client_id: str = ""
+    web_analyst_principals: str = ""
+    web_approver_principals: str = ""
+    web_admin_principals: str = ""
+
     # Comma-separated Google Workspace principals. When any of these are set,
     # they replace the example grants in config/authorization.yaml at runtime.
     chat_analyst_principals: str = ""

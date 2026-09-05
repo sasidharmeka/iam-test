@@ -42,6 +42,10 @@ jobs:
       CHAT_APPROVER_PRINCIPALS: ${{ vars.CHAT_APPROVER_PRINCIPALS }}
       CHAT_ADMIN_PRINCIPALS: ${{ vars.CHAT_ADMIN_PRINCIPALS }}
       CHAT_DEFAULT_SCOPE: ${{ vars.CHAT_DEFAULT_SCOPE || '/company' }}
+      WEB_GOOGLE_CLIENT_ID: ${{ vars.WEB_GOOGLE_CLIENT_ID }}
+      WEB_ANALYST_PRINCIPALS: ${{ vars.WEB_ANALYST_PRINCIPALS }}
+      WEB_APPROVER_PRINCIPALS: ${{ vars.WEB_APPROVER_PRINCIPALS }}
+      WEB_ADMIN_PRINCIPALS: ${{ vars.WEB_ADMIN_PRINCIPALS }}
 
     steps:
       - name: Check out repository
@@ -78,8 +82,8 @@ jobs:
             DATABASE_SECRET
             BIGQUERY_PROJECT
             BIGQUERY_DATASET
-            CHAT_ANALYST_PRINCIPALS
-            CHAT_APPROVER_PRINCIPALS
+            WEB_GOOGLE_CLIENT_ID
+            WEB_ANALYST_PRINCIPALS
           )
           for name in "${required[@]}"; do
             if [[ -z "${!name:-}" ]]; then
@@ -118,6 +122,14 @@ jobs:
           fi
           if [[ "${CHAT_ANALYST_PRINCIPALS}" == "${CHAT_APPROVER_PRINCIPALS}" ]]; then
             echo "::warning::Use different analyst and approver accounts for separation of duties."
+          fi
+          if [[ ! "${WEB_GOOGLE_CLIENT_ID}" =~ ^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$ ]]; then
+            echo "::error::WEB_GOOGLE_CLIENT_ID must be a Google OAuth web client ID."
+            exit 1
+          fi
+          if [[ -n "${WEB_APPROVER_PRINCIPALS}" \
+            && "${WEB_ANALYST_PRINCIPALS}" == "${WEB_APPROVER_PRINCIPALS}" ]]; then
+            echo "::warning::A web user cannot approve an action they requested themselves."
           fi
 
       - name: Authenticate to Google Cloud with WIF
@@ -158,7 +170,7 @@ jobs:
           gcloud secrets describe "${DATABASE_SECRET}" \
             --project="${GCP_PROJECT_ID}" >/dev/null
 
-      - name: Deploy private Cloud Run service
+      - name: Deploy Cloud Run revision
         shell: bash
         run: |
           set -euo pipefail
@@ -177,17 +189,27 @@ jobs:
             --max=1 \
             --no-allow-unauthenticated \
             --add-cloudsql-instances="${CLOUD_SQL_INSTANCE}" \
-            --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}|GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION}|GEMINI_MODEL=${GEMINI_MODEL}|BIGQUERY_PROJECT=${BIGQUERY_PROJECT}|BIGQUERY_DATASET=${BIGQUERY_DATASET}|BIGQUERY_ROWS_PER_TABLE=${BIGQUERY_ROWS_PER_TABLE}|VERIFY_GOOGLE_CHAT_TOKEN=false|CHAT_ANALYST_PRINCIPALS=${CHAT_ANALYST_PRINCIPALS}|CHAT_APPROVER_PRINCIPALS=${CHAT_APPROVER_PRINCIPALS}|CHAT_ADMIN_PRINCIPALS=${CHAT_ADMIN_PRINCIPALS}|CHAT_DEFAULT_SCOPE=${CHAT_DEFAULT_SCOPE}" \
+            --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}|GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION}|GEMINI_MODEL=${GEMINI_MODEL}|BIGQUERY_PROJECT=${BIGQUERY_PROJECT}|BIGQUERY_DATASET=${BIGQUERY_DATASET}|BIGQUERY_ROWS_PER_TABLE=${BIGQUERY_ROWS_PER_TABLE}|VERIFY_GOOGLE_CHAT_TOKEN=true|GOOGLE_CHAT_AUDIENCE=https://pending.invalid/google-chat/events|ENABLE_WEB_UI=true|WEB_GOOGLE_CLIENT_ID=${WEB_GOOGLE_CLIENT_ID}|WEB_ANALYST_PRINCIPALS=${WEB_ANALYST_PRINCIPALS}|WEB_APPROVER_PRINCIPALS=${WEB_APPROVER_PRINCIPALS}|WEB_ADMIN_PRINCIPALS=${WEB_ADMIN_PRINCIPALS}|CHAT_ANALYST_PRINCIPALS=${CHAT_ANALYST_PRINCIPALS}|CHAT_APPROVER_PRINCIPALS=${CHAT_APPROVER_PRINCIPALS}|CHAT_ADMIN_PRINCIPALS=${CHAT_ADMIN_PRINCIPALS}|CHAT_DEFAULT_SCOPE=${CHAT_DEFAULT_SCOPE}" \
             --set-secrets="DATABASE_URL=${DATABASE_SECRET}:latest" \
             --quiet
 
-      - name: Allow authenticated Google Chat delivery
+      - name: Configure verified public endpoints
+        shell: bash
         run: |
-          gcloud run services add-iam-policy-binding "${CLOUD_RUN_SERVICE}" \
+          set -euo pipefail
+          service_url="$(gcloud run services describe "${CLOUD_RUN_SERVICE}" \
             --project="${GCP_PROJECT_ID}" \
             --region="${GCP_REGION}" \
-            --member="serviceAccount:chat@system.gserviceaccount.com" \
-            --role="roles/run.invoker" \
+            --format='value(status.url)')"
+
+          # The browser must reach the sign-in page before it has a Google ID token.
+          # Every state-changing route verifies either a Google user ID token or
+          # Google Chat's service-account ID token inside the application.
+          gcloud run services update "${CLOUD_RUN_SERVICE}" \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --update-env-vars="GOOGLE_CHAT_AUDIENCE=${service_url}/google-chat/events" \
+            --no-invoker-iam-check \
             --quiet
 
       - name: Show endpoint and next step
@@ -204,6 +226,10 @@ jobs:
             echo "Cloud Run service: ${service_url}"
             echo
             echo "Google Chat HTTP endpoint: ${service_url}/google-chat/events"
+            echo
+            echo "Gmail-authenticated web interface: ${service_url}"
+            echo
+            echo "OAuth authorized JavaScript origin: ${service_url}"
             echo
             echo "Register that endpoint in Google Chat API > Configuration."
           } >> "${GITHUB_STEP_SUMMARY}"

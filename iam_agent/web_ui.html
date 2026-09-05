@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>IAM Agent</title>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --ink: #162238;
+        --muted: #65738a;
+        --line: #dce3ed;
+        --panel: #ffffff;
+        --canvas: #f3f6fa;
+        --brand: #2758d7;
+        --brand-dark: #183a93;
+        --danger: #b42318;
+      }
+
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--canvas); color: var(--ink); }
+      button, input { font: inherit; }
+      button { cursor: pointer; }
+
+      .shell {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: minmax(230px, 300px) minmax(0, 1fr);
+      }
+
+      aside {
+        padding: 28px;
+        color: white;
+        background: linear-gradient(155deg, #10265b, #244fb9 68%, #3b78e7);
+      }
+
+      .mark {
+        width: 48px;
+        height: 48px;
+        display: grid;
+        place-items: center;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.16);
+        font-weight: 800;
+      }
+
+      h1 { margin: 18px 0 8px; font-size: 28px; }
+      aside p { margin: 0; color: #d9e4ff; line-height: 1.55; }
+      .identity { margin-top: 32px; padding-top: 22px; border-top: 1px solid rgba(255,255,255,.2); }
+      .identity strong, .identity span { display: block; }
+      .identity span { margin-top: 4px; color: #d9e4ff; overflow-wrap: anywhere; }
+
+      main {
+        width: min(920px, 100%);
+        margin: 0 auto;
+        min-height: 100vh;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        padding: 24px;
+      }
+
+      header, .composer, .empty, .message {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        box-shadow: 0 10px 28px rgba(25, 45, 80, 0.06);
+      }
+
+      header {
+        border-radius: 16px;
+        padding: 16px 18px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+      }
+
+      header h2 { margin: 0; font-size: 18px; }
+      header p { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+      #signout { display: none; }
+
+      .button {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 14px;
+        color: white;
+        background: var(--brand);
+        font-weight: 700;
+      }
+
+      .button:hover { background: var(--brand-dark); }
+      .button.secondary { color: var(--ink); background: #edf2fa; }
+      .button.danger { background: var(--danger); }
+
+      #messages {
+        min-height: 0;
+        overflow-y: auto;
+        padding: 24px 2px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .empty { border-radius: 16px; padding: 28px; text-align: center; }
+      .empty h3 { margin: 0 0 10px; }
+      .empty p { margin: 0; color: var(--muted); line-height: 1.6; }
+
+      .message {
+        width: min(720px, 90%);
+        border-radius: 16px;
+        padding: 16px 18px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .message.user { align-self: flex-end; color: white; background: var(--brand); border-color: var(--brand); }
+      .message.agent { align-self: flex-start; }
+      .message.error { align-self: flex-start; color: var(--danger); border-color: #f2b8b5; }
+      .message .label { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; opacity: .72; }
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+
+      .composer { border-radius: 16px; padding: 12px; display: flex; gap: 10px; }
+      .composer input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+      .composer input:focus { outline: 3px solid rgba(39, 88, 215, .15); border-color: var(--brand); }
+      .composer input:disabled, .composer button:disabled { cursor: not-allowed; opacity: .55; }
+
+      @media (max-width: 720px) {
+        .shell { grid-template-columns: 1fr; }
+        aside { padding: 18px 22px; }
+        aside p, .identity { display: none; }
+        h1 { margin: 8px 0 0; font-size: 22px; }
+        main { min-height: calc(100vh - 98px); padding: 14px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside>
+        <div class="mark">IAM</div>
+        <h1>Identity Risk Agent</h1>
+        <p>Investigate BigQuery identity signals and send deterministic remediations through human approval.</p>
+        <div class="identity">
+          <strong>Signed-in identity</strong>
+          <span id="identity">Not signed in</span>
+        </div>
+      </aside>
+
+      <main>
+        <header>
+          <div>
+            <h2>Investigation workspace</h2>
+            <p>Google-authenticated browser interface</p>
+          </div>
+          <div id="signin"></div>
+          <button id="signout" class="button secondary" type="button">Sign out</button>
+        </header>
+
+        <section id="messages" aria-live="polite">
+          <div id="empty" class="empty">
+            <h3>Sign in to start</h3>
+            <p>Then try <strong>help</strong> or <strong>investigate user1</strong>.</p>
+          </div>
+        </section>
+
+        <form id="composer" class="composer">
+          <input id="prompt" type="text" maxlength="1000" autocomplete="off" placeholder="Ask the IAM agent…" disabled>
+          <button id="send" class="button" type="submit" disabled>Send</button>
+        </form>
+      </main>
+    </div>
+
+    <script>
+      const clientId = "__GOOGLE_CLIENT_ID__";
+      let credential = "";
+
+      const messages = document.getElementById("messages");
+      const empty = document.getElementById("empty");
+      const promptInput = document.getElementById("prompt");
+      const sendButton = document.getElementById("send");
+      const signout = document.getElementById("signout");
+      const identity = document.getElementById("identity");
+
+      function tokenClaims(token) {
+        let base64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+        base64 += "=".repeat((4 - (base64.length % 4)) % 4);
+        return JSON.parse(decodeURIComponent(atob(base64).split("").map((char) =>
+          "%" + ("00" + char.charCodeAt(0).toString(16)).slice(-2)
+        ).join("")));
+      }
+
+      function addMessage(kind, text, actions = []) {
+        empty?.remove();
+        const message = document.createElement("article");
+        message.className = `message ${kind}`;
+
+        const label = document.createElement("span");
+        label.className = "label";
+        label.textContent = kind === "user" ? "You" : kind === "error" ? "Error" : "IAM Agent";
+        message.appendChild(label);
+
+        const content = document.createElement("div");
+        content.textContent = text;
+        message.appendChild(content);
+
+        if (actions.length) {
+          const controls = document.createElement("div");
+          controls.className = "actions";
+          actions.forEach((action) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = `button ${action.approve ? "" : "danger"}`;
+            button.textContent = action.approve ? "Approve" : "Reject";
+            button.addEventListener("click", () => decide(action.actionId, action.approve));
+            controls.appendChild(button);
+          });
+          message.appendChild(controls);
+        }
+
+        messages.appendChild(message);
+        messages.scrollTop = messages.scrollHeight;
+      }
+
+      function plainText(htmlText) {
+        const documentFragment = new DOMParser().parseFromString(htmlText, "text/html");
+        return documentFragment.body.textContent || "";
+      }
+
+      function parseResponse(payload) {
+        if (payload.text) return { text: payload.text, actions: [] };
+        const card = payload.cardsV2?.[0]?.card;
+        if (!card) return { text: JSON.stringify(payload, null, 2), actions: [] };
+
+        const lines = [];
+        const actions = [];
+        for (const section of card.sections || []) {
+          for (const widget of section.widgets || []) {
+            if (widget.decoratedText) {
+              const item = widget.decoratedText;
+              lines.push(`${item.topLabel || ""}: ${item.text || ""}`.trim());
+              if (item.bottomLabel) lines.push(item.bottomLabel);
+            }
+            if (widget.textParagraph?.text) lines.push(plainText(widget.textParagraph.text));
+            for (const button of widget.buttonList?.buttons || []) {
+              const action = button.onClick?.action;
+              const actionId = action?.parameters?.find((item) => item.key === "action_id")?.value;
+              if (actionId) {
+                actions.push({
+                  actionId,
+                  approve: action.function === "approve_action",
+                });
+              }
+            }
+          }
+        }
+        return { text: lines.filter(Boolean).join("\n"), actions };
+      }
+
+      async function callApi(url, options) {
+        const response = await fetch(url, {
+          ...options,
+          headers: {
+            "Authorization": `Bearer ${credential}`,
+            "Content-Type": "application/json",
+            ...(options.headers || {}),
+          },
+        });
+        if (response.status === 401) {
+          credential = "";
+          promptInput.disabled = true;
+          sendButton.disabled = true;
+          throw new Error("Your Google sign-in expired. Refresh and sign in again.");
+        }
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || `Request failed (${response.status})`);
+        return payload;
+      }
+
+      async function sendMessage(text) {
+        addMessage("user", text);
+        promptInput.disabled = true;
+        sendButton.disabled = true;
+        try {
+          const payload = await callApi("/web/messages", {
+            method: "POST",
+            body: JSON.stringify({ text }),
+          });
+          const parsed = parseResponse(payload);
+          addMessage("agent", parsed.text, parsed.actions);
+        } catch (error) {
+          addMessage("error", error.message);
+        } finally {
+          if (credential) {
+            promptInput.disabled = false;
+            sendButton.disabled = false;
+            promptInput.focus();
+          }
+        }
+      }
+
+      async function decide(actionId, approve) {
+        try {
+          const payload = await callApi(`/web/actions/${encodeURIComponent(actionId)}/decision`, {
+            method: "POST",
+            body: JSON.stringify({ approve }),
+          });
+          const parsed = parseResponse(payload);
+          addMessage("agent", parsed.text, parsed.actions);
+        } catch (error) {
+          addMessage("error", error.message);
+        }
+      }
+
+      window.handleGoogleCredential = (response) => {
+        credential = response.credential;
+        const claims = tokenClaims(credential);
+        identity.textContent = claims.email || "Google account";
+        document.getElementById("signin").style.display = "none";
+        signout.style.display = "inline-block";
+        promptInput.disabled = false;
+        sendButton.disabled = false;
+        empty.querySelector("h3").textContent = "Ready to investigate";
+        empty.querySelector("p").textContent = "Try help or investigate user1.";
+        promptInput.focus();
+      };
+
+      signout.addEventListener("click", () => {
+        credential = "";
+        google.accounts.id.disableAutoSelect();
+        window.location.reload();
+      });
+
+      document.getElementById("composer").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const text = promptInput.value.trim();
+        if (!text || !credential) return;
+        promptInput.value = "";
+        sendMessage(text);
+      });
+
+      window.addEventListener("load", () => {
+        google.accounts.id.initialize({
+          client_id: clientId,
+          callback: window.handleGoogleCredential,
+        });
+        google.accounts.id.renderButton(document.getElementById("signin"), {
+          theme: "outline",
+          size: "large",
+          shape: "pill",
+        });
+      });
+    </script>
+  </body>
+</html>

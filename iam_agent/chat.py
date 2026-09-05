@@ -168,7 +168,7 @@ class GoogleChatHandler:
                     action_id=action_id,
                     approver=actor.principal,
                     approve=function_name == "approve_action",
-                    reason="Decision submitted in Google Chat",
+                    reason=f"Decision submitted in {event.get('source', 'Google Chat')}",
                 )
                 return _status_card(result.action, update=True)
             return {"text": "Unsupported Google Chat event."}

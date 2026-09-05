@@ -1,6 +1,7 @@
 # IAM Agent Platform
 
-Gemini-based IAM investigation and human-approved remediation service for Google Chat.
+Gemini-based IAM investigation and human-approved remediation service with both a
+personal-Gmail web interface and an optional Google Chat app.
 This repository is the agent layer for the analytics produced by
 [`sasidharmeka/IAM_NEW_1`](https://github.com/sasidharmeka/IAM_NEW_1).
 
@@ -8,12 +9,12 @@ The original regulatory-scanning/Telegram demo has been replaced by this workflo
 
 ```mermaid
 flowchart TD
-    A["Google Chat"] --> B["FastAPI on Cloud Run"]
+    A["Gmail web UI or Google Chat"] --> B["FastAPI on Cloud Run"]
     B --> C["Authentication and hierarchy authorization"]
     C --> D["IAM orchestrator"]
     D --> E["Gemini specialized agents"]
     E --> F["Cloud SQL action_queue"]
-    F --> G["Google Chat approval"]
+    F --> G["Web or Chat approval"]
     G --> H["Approval gateway"]
     H --> I["Deterministic IAM tool"]
     I --> J["Simulated Saviynt / AD / Okta state"]
@@ -24,15 +25,16 @@ flowchart TD
 
 - FastAPI endpoint for `MESSAGE`, `ADDED_TO_SPACE`, `REMOVED_FROM_SPACE`, and
   `CARD_CLICKED` Google Chat events.
-- Google Chat request authentication through Cloud Run IAM, with optional in-app OIDC
-  verification.
+- Browser chat interface using Google Identity Services, with backend verification of the
+  Google ID token. Personal `@gmail.com` accounts are supported through an allowlist.
+- Mandatory in-app verification of Google Chat's OIDC token in the deployed service.
 - Role and hierarchy authorization (`viewer`, `analyst`, `approver`, `admin`).
 - Read-only, parameterized access to 18 user-scoped BigQuery outputs from `IAM_NEW_1`.
 - Investigation, policy/RAG, impact, and remediation agents using Gemini structured output.
 - Concurrent investigation/policy/impact calls; remediation waits for all three results.
 - PostgreSQL/Cloud SQL `action_queue`, `audit_events`, and simulated IAM state.
-- Approve/reject cards in Google Chat, separation of duties, idempotency, and strict action
-  state transitions.
+- Approve/reject controls in the browser and Google Chat, separation of duties, idempotency,
+  and strict action state transitions.
 - Deterministic simulated execution for AD group removal, Saviynt access revocation, Okta
   MFA reset, and Okta identity suspension.
 - Post-execution verification. Gemini cannot directly call an execution tool.
@@ -56,7 +58,7 @@ access/provisioning, application behavior, orphan, and time-warp detections.
 
 ## Safety model
 
-1. The authenticated Chat user must have `investigate` permission for the target's
+1. The authenticated browser or Chat user must have `investigate` permission for the target's
    organizational path.
 2. Gemini returns Pydantic-validated output and can choose only a fixed operation enum.
 3. The exact resource must appear in collected evidence for group or entitlement removal.
@@ -74,7 +76,8 @@ access/provisioning, application behavior, orphan, and time-warp detections.
 main.py                         Cloud Run / Uvicorn entry point
 iam_agent/api.py                FastAPI app and dependency wiring
 iam_agent/chat.py               Google Chat event and card handling
-iam_agent/authentication.py     Optional OIDC token verification
+iam_agent/authentication.py     Google web and Chat token verification
+iam_agent/web_ui.html           Personal-Gmail browser interface
 iam_agent/authorization.py      Role + hierarchy enforcement
 iam_agent/orchestrator.py       Agent workflow and safety validation
 iam_agent/evidence.py           BigQuery allowlisted evidence queries
@@ -103,8 +106,8 @@ uvicorn main:app --reload
 ```
 
 For local use, either replace the example principals in `config/authorization.yaml` or set
-`CHAT_ANALYST_PRINCIPALS` and `CHAT_APPROVER_PRINCIPALS` in `.env`. Deployment uses the
-environment variables, so no authorization file edit is required.
+the `WEB_*_PRINCIPALS`/`CHAT_*_PRINCIPALS` values in `.env`. Deployment uses environment
+variables, so no authorization file edit is required.
 
 Run the offline validation suite:
 
@@ -119,9 +122,9 @@ The tests do not call Gemini, BigQuery, Google Chat, or GCP.
 
 The repository includes `.github/workflows/deploy-agent.yml`. After its GitHub Environment
 variables are configured, use **Actions > Deploy IAM Agent > Run workflow**. The workflow
-runs tests, authenticates using WIF, deploys the private scale-to-zero Cloud Run service,
-connects Cloud SQL and Secret Manager, grants Google Chat invocation access, and prints the
-Chat endpoint in the job summary.
+runs tests, authenticates using WIF, deploys the scale-to-zero Cloud Run service, connects
+Cloud SQL and Secret Manager, enables application-authenticated HTTPS access, and prints both
+the Gmail web URL and Google Chat endpoint in the job summary.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact variable list, one-time IAM prerequisites,
 Cloud SQL secret format, WIF repository binding, and Google Chat registration steps.
@@ -143,17 +146,15 @@ gcloud run deploy iam-agent \
   --project rapid-stage-506406-t4 \
   --region us-central1 \
   --service-account IAM_AGENT_RUNTIME_SERVICE_ACCOUNT \
-  --no-allow-unauthenticated \
+  --allow-unauthenticated \
   --add-cloudsql-instances rapid-stage-506406-t4:us-central1:CLOUD_SQL_INSTANCE \
-  --set-env-vars BIGQUERY_PROJECT=rapid-stage-506406-t4,BIGQUERY_DATASET=iam_data_dev,GOOGLE_CLOUD_LOCATION=us-central1,GEMINI_MODEL=gemini-2.5-flash \
+  --set-env-vars BIGQUERY_PROJECT=rapid-stage-506406-t4,BIGQUERY_DATASET=iam_data_dev,GOOGLE_CLOUD_LOCATION=us-central1,GEMINI_MODEL=gemini-2.5-flash,ENABLE_WEB_UI=true,WEB_GOOGLE_CLIENT_ID=YOUR_WEB_CLIENT_ID,WEB_ANALYST_PRINCIPALS=YOUR_GMAIL,VERIFY_GOOGLE_CHAT_TOKEN=true,GOOGLE_CHAT_AUDIENCE=https://YOUR_CLOUD_RUN_URL/google-chat/events \
   --set-secrets DATABASE_URL=IAM_AGENT_DATABASE_URL:latest
-
-gcloud run services add-iam-policy-binding iam-agent \
-  --project rapid-stage-506406-t4 \
-  --region us-central1 \
-  --member serviceAccount:chat@system.gserviceaccount.com \
-  --role roles/run.invoker
 ```
+
+Public reachability is needed to display the login page. The browser message and decision
+routes still require a valid Google ID token and an allowlisted email. The Google Chat route
+requires Chat's Google-signed service-account token.
 
 In Google Chat API configuration:
 

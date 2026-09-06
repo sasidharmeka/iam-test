@@ -58,6 +58,10 @@ def test_deployment_injects_read_only_query_limits_without_database() -> None:
     for fragment in forbidden_fragments:
         assert fragment not in workflow
 
+    # The workflow authenticates as the deployer, which intentionally has no
+    # permission to inspect IAM data. BigQuery access belongs to the runtime SA.
+    assert 'show "${BIGQUERY_PROJECT}:${BIGQUERY_DATASET}"' not in workflow
+
 
 def test_setup_is_idempotent_and_has_no_database_or_destructive_commands() -> None:
     script = SETUP_PATH.read_text(encoding="utf-8")

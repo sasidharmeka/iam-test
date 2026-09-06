@@ -126,14 +126,13 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
 
-      - name: Check referenced Cloud resources
+      - name: Check runtime service account
         shell: bash
         run: |
           set -euo pipefail
           gcloud iam service-accounts describe "${RUNTIME_SERVICE_ACCOUNT}" \
-            --project="${GCP_PROJECT_ID}" >/dev/null
-          bq --project_id="${BIGQUERY_PROJECT}" show "${BIGQUERY_PROJECT}:${BIGQUERY_DATASET}" \
-            >/dev/null
+            --project="${GCP_PROJECT_ID}" \
+            --format='value(email)'
 
       - name: Deploy Cloud Run revision
         shell: bash

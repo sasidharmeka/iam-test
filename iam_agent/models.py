@@ -37,6 +37,13 @@ class AnswerMode(StrEnum):
     MIXED = "mixed"
 
 
+class ReportFormat(StrEnum):
+    CSV = "csv"
+    EXCEL = "xlsx"
+    PDF = "pdf"
+    WORD = "docx"
+
+
 class QueryOperation(StrEnum):
     RECORDS = "records"
     AGGREGATE = "aggregate"
@@ -75,14 +82,6 @@ class QuestionDecomposition(BaseModel):
     entities: list[str] = Field(default_factory=list)
     requires_project_data: bool
     requires_policy_context: bool = False
-
-    @model_validator(mode="after")
-    def data_questions_need_domains(self) -> QuestionDecomposition:
-        if self.requires_project_data and not self.domains:
-            raise ValueError("A project-data question must select at least one IAM domain")
-        if self.answer_mode == AnswerMode.GENERAL and self.requires_project_data:
-            raise ValueError("A general answer cannot require project data")
-        return self
 
 
 FilterValue = str | int | float | bool | date | datetime | list[str] | list[int] | list[float]
@@ -207,8 +206,17 @@ class ConversationTurn(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ReportDescriptor(BaseModel):
+    report_id: str
+    format: ReportFormat
+    filename: str
+    mime_type: str
+    download_url: str
+
+
 class ChatWorkflowResult(BaseModel):
     decomposition: QuestionDecomposition
     answer: AnalystAnswer
     plan: AnalysisPlan | None = None
     evidence: EvidenceBundle | None = None
+    reports: list[ReportDescriptor] = Field(default_factory=list)

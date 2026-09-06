@@ -100,8 +100,31 @@ class SemanticCatalog:
             if invalid:
                 raise CatalogError(f"Unsafe identifiers in {concept_name}: {invalid}")
 
-    def domain_summaries(self) -> dict[str, str]:
-        return {domain.value: definition.description for domain, definition in self.domains.items()}
+    def domain_summaries(self) -> dict[str, dict]:
+        """Return compact but grounded cards for first-pass domain routing.
+
+        Every concept is represented here so routing never depends on Gemini already knowing
+        what an internal domain name means. Physical tables, fields, and metrics remain hidden
+        until the selected-domain description call.
+        """
+        summaries: dict[str, dict] = {}
+        for domain, definition in self.domains.items():
+            summaries[domain.value] = {
+                "description": definition.description,
+                "synonyms": definition.synonyms,
+                "concepts": [
+                    {
+                        "name": name,
+                        "description": concept.description,
+                        "entity": concept.entity,
+                        "grain": concept.grain,
+                        "synonyms": concept.synonyms,
+                    }
+                    for name, concept in self.concepts.items()
+                    if domain in concept.domains
+                ],
+            }
+        return summaries
 
     def concept(self, name: str) -> ConceptDefinition:
         try:

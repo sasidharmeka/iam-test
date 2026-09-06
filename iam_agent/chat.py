@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+from uuid import uuid4
 
 from iam_agent.authorization import AuthorizationError
 from iam_agent.mcp_client import MCPToolError
 from iam_agent.models import ChatActor, ChatWorkflowResult
 from iam_agent.orchestrator import IAMOrchestrator
+from iam_agent.reporting import requested_report_formats
 from iam_mcp.catalog import CatalogError
 from iam_mcp.validator import QueryPlanError
 
@@ -18,8 +21,11 @@ HELP_TEXT = """IAM Analytics Agent is read-only. Ask natural-language questions 
 • Compare role drift across departments.
 • What changed for user12 during the last 30 days?
 • What does shadow access mean?
+• Export the riskiest users as Excel and PDF.
 
 The agent can query only the 22 governed IAM analytics outputs and never modifies IAM data."""
+
+logger = logging.getLogger(__name__)
 
 
 def _actor(event: dict[str, Any]) -> ChatActor:
@@ -61,7 +67,12 @@ class GoogleChatHandler:
     def __init__(self, orchestrator: IAMOrchestrator):
         self.orchestrator = orchestrator
 
-    async def handle(self, event: dict[str, Any]) -> dict[str, Any]:
+    async def handle(
+        self,
+        event: dict[str, Any],
+        *,
+        include_reports: bool = False,
+    ) -> dict[str, Any]:
         event_type = event.get("type") or event.get("eventType", "")
         if event_type == "ADDED_TO_SPACE":
             return {"text": "IAM Analytics Agent is ready. Send `help` or ask an IAM question."}
@@ -80,14 +91,31 @@ class GoogleChatHandler:
                 actor=actor,
                 question=text,
                 conversation_key=_conversation_key(event, actor),
+                report_formats=requested_report_formats(text) if include_reports else [],
             )
-            return {"text": _render(result)}
+            response: dict[str, Any] = {"text": _render(result)}
+            if include_reports and result.reports:
+                response["reports"] = [
+                    report.model_dump(mode="json") for report in result.reports
+                ]
+            return response
         except AuthorizationError:
             return {"text": "You are not authorized to query this IAM analytics environment."}
         except (CatalogError, QueryPlanError, MCPToolError, ValueError) as exc:
+            reference = uuid4().hex[:12]
+            logger.warning("Safe analytical request rejected [%s]: %s", reference, exc)
             return {
                 "text": (
-                    "I could not safely execute that analytical request. "
-                    f"{exc} Try narrowing or rephrasing the question."
+                    "I could not build a safe query for that request, even after one automatic "
+                    f"plan repair. Try narrowing or rephrasing it. Reference: {reference}"
+                )
+            }
+        except Exception:
+            reference = uuid4().hex[:12]
+            logger.exception("Unexpected conversational request failure [%s]", reference)
+            return {
+                "text": (
+                    "The request could not be completed because of an internal error. "
+                    f"Please try again. Reference: {reference}"
                 )
             }

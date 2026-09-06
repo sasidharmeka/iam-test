@@ -114,6 +114,9 @@ That is the complete variable list. In particular, do not create `DATABASE_SECRE
 `CLOUD_SQL_INSTANCE`, `DATABASE_URL`, `CHAT_APPROVER_PRINCIPALS`, or
 `WEB_APPROVER_PRINCIPALS`.
 
+CSV, Excel, PDF, and Word downloads require no additional GitHub or Cloud Run variables. They
+are generated from the already-returned evidence and held briefly in application memory.
+
 The workflow itself sets `ENABLE_WEB_UI=true`, discovers the final Chat audience URL, and enables
 Google Chat request-token verification.
 
@@ -202,11 +205,17 @@ Why is user12 risky?
 Show user12's timeline.
 Compare MFA bypasses by application.
 Which Finance users have stale access?
+Show the riskiest users by application and export as CSV.
+Analyze user16 and give me Excel and PDF reports.
+Compare MFA bypasses by application in a Word document.
 ```
 
 The first question can be answered generally. The other questions cause MCP catalog discovery,
 a typed Gemini plan, deterministic SQL compilation, a BigQuery dry run, a bounded query, and a
-grounded response.
+grounded response. An explicit CSV, Excel/XLSX, PDF, or Word/DOCX request adds download buttons
+below the answer. Download the files within 15 minutes; a Cloud Run instance restart also clears
+them. The endpoint re-verifies the signed-in Google account and never returns another user's
+report.
 
 ## Step 6: optionally configure Google Chat
 

@@ -5,13 +5,16 @@ from __future__ import annotations
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
+from iam_agent.authorization import AuthorizationError
 from iam_agent.models import AnalysisPlan, EvidenceBundle
+from iam_mcp.catalog import CatalogError
 from iam_mcp.service import IAMEvidenceService
+from iam_mcp.validator import QueryPlanError
 
 
 class DomainListResponse(BaseModel):
     catalog_version: int
-    domains: dict[str, str]
+    domains: dict[str, dict]
 
 
 class DomainDescriptionResponse(BaseModel):
@@ -19,6 +22,12 @@ class DomainDescriptionResponse(BaseModel):
     domains: dict[str, str]
     concepts: list[dict]
     rules: list[str]
+
+
+class QueryToolResponse(BaseModel):
+    ok: bool
+    evidence: EvidenceBundle | None = None
+    error: str | None = None
 
 
 def create_mcp_server(service: IAMEvidenceService) -> MCPServer:
@@ -59,7 +68,13 @@ def create_mcp_server(service: IAMEvidenceService) -> MCPServer:
         ),
         structured_output=True,
     )
-    async def run_iam_query(principal: str, plan: AnalysisPlan) -> EvidenceBundle:
-        return await service.run_query(principal=principal, plan=plan)
+    async def run_iam_query(principal: str, plan: AnalysisPlan) -> QueryToolResponse:
+        try:
+            evidence = await service.run_query(principal=principal, plan=plan)
+        except (AuthorizationError, CatalogError, QueryPlanError, ValueError) as exc:
+            # Expected plan rejections are data, not an MCP transport failure. This gives the
+            # orchestrator a precise reason it can use for one bounded repair attempt.
+            return QueryToolResponse(ok=False, error=str(exc))
+        return QueryToolResponse(ok=True, evidence=evidence)
 
     return server

@@ -119,6 +119,10 @@
       .message.agent { align-self: flex-start; }
       .message.error { align-self: flex-start; color: var(--danger); border-color: #f2b8b5; }
       .message .label { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; opacity: .72; }
+      .downloads { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+      .download { border: 1px solid #b9c8e4; border-radius: 9px; padding: 8px 11px; color: var(--brand-dark); background: #edf2fa; font-weight: 700; }
+      .download:hover { border-color: var(--brand); background: #e1e9f8; }
+      .download:disabled { cursor: wait; opacity: .55; }
       .composer { border-radius: 16px; padding: 12px; display: flex; gap: 10px; }
       .composer input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
       .composer input:focus { outline: 3px solid rgba(39, 88, 215, .15); border-color: var(--brand); }
@@ -204,6 +208,7 @@
 
         messages.appendChild(message);
         messages.scrollTop = messages.scrollHeight;
+        return message;
       }
 
       function parseResponse(payload) {
@@ -225,9 +230,63 @@
           sendButton.disabled = true;
           throw new Error("Your Google sign-in expired. Refresh and sign in again.");
         }
-        const payload = await response.json();
+        const body = await response.text();
+        let payload = {};
+        if (body) {
+          try {
+            payload = JSON.parse(body);
+          } catch {
+            payload = { detail: body };
+          }
+        }
         if (!response.ok) throw new Error(payload.detail || `Request failed (${response.status})`);
         return payload;
+      }
+
+      async function downloadReport(report, button) {
+        if (!report.download_url.startsWith("/web/reports/")) return;
+        button.disabled = true;
+        try {
+          const response = await fetch(report.download_url, {
+            headers: { "Authorization": `Bearer ${credential}` },
+          });
+          if (!response.ok) {
+            const body = await response.text();
+            let detail = body;
+            try { detail = JSON.parse(body).detail || body; } catch {}
+            throw new Error(detail || `Download failed (${response.status})`);
+          }
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = report.filename;
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          URL.revokeObjectURL(url);
+        } catch (error) {
+          addMessage("error", error.message);
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      function addReportButtons(message, reports) {
+        if (!reports?.length) return;
+        const labels = { csv: "CSV", xlsx: "Excel", pdf: "PDF", docx: "Word" };
+        const downloads = document.createElement("div");
+        downloads.className = "downloads";
+        for (const report of reports) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "download";
+          button.textContent = `Download ${labels[report.format] || report.format}`;
+          button.addEventListener("click", () => downloadReport(report, button));
+          downloads.appendChild(button);
+        }
+        message.appendChild(downloads);
+        messages.scrollTop = messages.scrollHeight;
       }
 
       async function sendMessage(text) {
@@ -239,7 +298,8 @@
             method: "POST",
             body: JSON.stringify({ text }),
           });
-          addMessage("agent", parseResponse(payload));
+          const message = addMessage("agent", parseResponse(payload));
+          addReportButtons(message, payload.reports);
         } catch (error) {
           addMessage("error", error.message);
         } finally {

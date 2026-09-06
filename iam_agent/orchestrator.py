@@ -6,10 +6,11 @@ from iam_agent.answerer import AnswerAgent
 from iam_agent.authorization import AuthorizationService
 from iam_agent.config import Settings
 from iam_agent.conversation import ConversationStore
-from iam_agent.mcp_client import IAMEvidenceMCPClient
-from iam_agent.models import ChatActor, ChatWorkflowResult, ConversationTurn
+from iam_agent.mcp_client import IAMEvidenceMCPClient, MCPToolError
+from iam_agent.models import ChatActor, ChatWorkflowResult, ConversationTurn, ReportFormat
 from iam_agent.planner import QuestionPlanner
 from iam_agent.policy_rag import PolicyStore
+from iam_agent.reporting import ReportService
 
 
 class IAMOrchestrator:
@@ -25,6 +26,7 @@ class IAMOrchestrator:
         planner: QuestionPlanner,
         answerer: AnswerAgent,
         conversations: ConversationStore,
+        report_service: ReportService | None = None,
     ):
         self.settings = settings
         self.authorization = authorization
@@ -33,6 +35,7 @@ class IAMOrchestrator:
         self.planner = planner
         self.answerer = answerer
         self.conversations = conversations
+        self.report_service = report_service
 
     async def answer(
         self,
@@ -40,6 +43,7 @@ class IAMOrchestrator:
         actor: ChatActor,
         question: str,
         conversation_key: str,
+        report_formats: list[ReportFormat] | None = None,
     ) -> ChatWorkflowResult:
         self.authorization.require_query(actor.principal)
         history = await self.conversations.get(conversation_key)
@@ -66,7 +70,21 @@ class IAMOrchestrator:
                 maximum_rows=self.settings.query_max_rows,
                 maximum_lookback_days=self.settings.query_max_lookback_days,
             )
-            evidence = await self.mcp_client.run_query(actor.principal, plan)
+            try:
+                evidence = await self.mcp_client.run_query(actor.principal, plan)
+            except MCPToolError as exc:
+                plan = await self.planner.repair_plan(
+                    question=question,
+                    decomposition=decomposition,
+                    history=history,
+                    catalog_context=catalog_context,
+                    rejected_plan=plan,
+                    rejection_reason=str(exc),
+                    maximum_steps=self.settings.query_max_steps,
+                    maximum_rows=self.settings.query_max_rows,
+                    maximum_lookback_days=self.settings.query_max_lookback_days,
+                )
+                evidence = await self.mcp_client.run_query(actor.principal, plan)
             answer = await self.answerer.answer_from_evidence(
                 question=question,
                 decomposition=decomposition,
@@ -91,12 +109,23 @@ class IAMOrchestrator:
                 domains=decomposition.domains,
             ),
         )
-        return ChatWorkflowResult(
+        result = ChatWorkflowResult(
             decomposition=decomposition,
             plan=plan,
             evidence=evidence,
             answer=answer,
         )
+        if report_formats and self.report_service:
+            result.reports, failures = await self.report_service.create_reports(
+                owner=actor.principal,
+                result=result,
+                formats=report_formats,
+            )
+            if failures and len(result.answer.caveats) < 8:
+                result.answer.caveats.append(
+                    "Could not generate these requested report formats: " + ", ".join(failures)
+                )
+        return result
 
     def _policy_chunks(self, question: str) -> list[dict]:
         return [

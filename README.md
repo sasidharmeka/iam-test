@@ -10,11 +10,14 @@ conversational IAM analyst. A user can ask broad questions such as:
 - "What changed for user12 in the last 30 days?"
 - "Which Finance identities show role drift?"
 - "What is shadow access?"
+- "Export the ten riskiest users as Excel and PDF."
 
 Gemini understands the question and creates a typed semantic plan. It never writes SQL. The
 MCP evidence service validates the plan against a versioned catalog, applies the user's
 hierarchy scope, compiles parameterized `SELECT` statements, checks their estimated BigQuery
 cost, and returns evidence. Gemini then explains that evidence in ordinary conversation.
+For browser requests that explicitly name CSV, Excel, PDF, or Word, deterministic exporters
+turn the same bounded answer and evidence into authenticated download files.
 
 This version is intentionally read-only. It contains no remediation agent, approval gateway,
 action queue, deterministic IAM mutation tool, Cloud SQL dependency, or database secret.
@@ -39,6 +42,7 @@ flowchart TD
     O <--> M["In-process MCP evidence server"]
     M --> C["Catalog + validator + SQL compiler"]
     C --> B
+    O --> R["CSV, Excel, PDF, Word exporters"]
 ```
 
 The MCP client and server use the official MCP Python SDK. They run in the same Cloud Run
@@ -50,7 +54,7 @@ Gemini's semantic plan format.
 
 | Component | Responsibility |
 | --- | --- |
-| Gemini question planner | Resolves follow-ups, classifies general/data/mixed questions, and selects IAM domains |
+| Gemini question planner | Resolves follow-ups, classifies general/data/mixed questions, and selects grounded IAM domain cards |
 | MCP catalog tools | Expose approved domain, concept, field, dimension, metric, and grain descriptions |
 | Gemini query planner | Produces `AnalysisPlan` JSON using catalog vocabulary only |
 | Pydantic models | Reject malformed or structurally unsafe plans |
@@ -58,6 +62,7 @@ Gemini's semantic plan format.
 | SQL compiler | Maps trusted concepts and metrics to fixed tables and SQL expressions; the only code that creates SQL |
 | BigQuery executor | Dry-runs each query, enforces bytes billed, executes read-only SQL, and returns rows |
 | Gemini answerer | Explains only the returned evidence and cites only queried outputs |
+| Report exporters | Deterministically render returned evidence; they cannot query BigQuery or execute formulas |
 
 Gemini can choose among allowed analytical building blocks, but cannot invent a table, metric
 expression, SQL fragment, or write operation.
@@ -74,6 +79,7 @@ iam_agent/
   orchestrator.py        Conversation workflow
   mcp_client.py           Official in-process MCP client
   conversation.py        Bounded in-memory follow-up context
+  reporting.py           Authenticated CSV/XLSX/PDF/DOCX generation and short-lived storage
 
 iam_mcp/
   server.py              Three read-only MCP tools
@@ -93,12 +99,33 @@ config/
 
 | Tool | Input | Result | BigQuery access |
 | --- | --- | --- | --- |
-| `list_iam_domains` | None | Five compact domain descriptions | None |
+| `list_iam_domains` | None | Five routing cards covering all 22 concept names, meanings, entities, grains, and synonyms | None |
 | `describe_iam_domains` | Selected domains | Relevant concepts, schemas, metrics, and rules | None |
 | `run_iam_query` | Verified principal plus typed `AnalysisPlan` | `EvidenceBundle` | Bounded `SELECT` only |
 
 Gemini does not directly call BigQuery. The orchestrator makes MCP calls on Gemini's behalf and
 passes the returned metadata/evidence back into Gemini's next structured-output call.
+
+If Gemini marks a question as project-data analysis but omits its domains, deterministic
+normalization selects all five governed cards for the detailed planning pass. If the resulting
+semantic plan is rejected, Gemini receives the catalog plus the exact validator reason for one
+repair attempt. The repaired plan goes through the complete MCP validator again; no rejected
+plan or model-generated SQL is ever executed.
+
+## Browser report exports
+
+Ask for one or several formats in the same message:
+
+- "Show the riskiest users by application and export as CSV."
+- "Analyze user16 and give me Excel and PDF reports."
+- "Compare MFA bypasses by application in a Word document."
+- "Export this analysis in all report formats."
+
+The browser displays one authenticated download button per requested format. Files contain the
+answer, findings, sources, caveats, and the returned evidence rows. Spreadsheet-like text is
+escaped to prevent formula injection. Downloads are bound to the Google account that created
+them, kept only in the running instance's memory, and expire after 15 minutes. They are intended
+for immediate download and require no Cloud SQL, GCS bucket, secret, or new environment variable.
 
 ## Five catalog domains
 
@@ -156,5 +183,6 @@ answer general IAM questions without claiming they describe this project. It can
 answer project-specific questions when the needed fact is absent from those outputs; in that
 case it reports the gap. Some pipeline jobs overwrite their output tables, so a request for a
 long historical trend is possible only when the relevant table actually retains that history.
+Exporting a response changes its format, not the amount or scope of evidence available.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical sequence and safety invariants.

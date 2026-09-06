@@ -38,7 +38,8 @@ When a Cloud Run instance starts, `iam_agent/api.py` constructs the dependency g
 4. Register the service's three tools on an official `MCPServer`.
 5. Give the orchestrator an official MCP `Client`, a Gemini planner, an answerer, and bounded
    conversation memory.
-6. During FastAPI lifespan startup, call MCP `list_tools` and `list_iam_domains`. Startup fails
+6. Create deterministic report exporters and a bounded, 15-minute in-memory download store.
+7. During FastAPI lifespan startup, call MCP `list_tools` and `list_iam_domains`. Startup fails
    if the expected tool contract is incomplete.
 
 The MCP transport is in-process. That is an intentional deployment choice, not a mock: tool
@@ -61,16 +62,23 @@ sequenceDiagram
     F->>O: Verified principal + conversation key
     O->>O: Require query permission
     O->>M: list_iam_domains (cached)
-    M-->>O: Five domain summaries
-    O->>G: Question + history + domain summaries
+    M-->>O: Five cards describing all 22 concepts
+    O->>G: Question + history + grounded domain cards
     G-->>O: QuestionDecomposition
     alt Project data is required
+        O->>O: Normalize missing domains to all governed domains
         O->>M: describe_iam_domains(selected domains)
         M-->>O: Relevant concepts and semantic schema
         O->>G: Create typed AnalysisPlan
         G-->>O: Semantic steps, no SQL
         O->>M: run_iam_query(principal, plan)
         M->>M: Validate scope, catalog, and limits
+        opt Plan rejected
+            M-->>O: Typed rejection reason
+            O->>G: Repair plan once using same catalog
+            G-->>O: Corrected semantic plan
+            O->>M: Validate corrected plan from the beginning
+        end
         M->>M: Compile parameterized SELECT
         M->>B: Dry run
         B-->>M: Estimated bytes
@@ -83,13 +91,35 @@ sequenceDiagram
         O->>G: General answer without project claims
         G-->>O: AnalystAnswer
     end
-    O-->>F: Answer + sources + caveats
-    F-->>U: Conversational response
+    opt Browser requested report formats
+        O->>O: Render deterministic report files
+    end
+    O-->>F: Answer + sources + caveats + file descriptors
+    F-->>U: Response and authenticated download buttons
 ```
 
 The orchestrator—not Gemini—owns every MCP call. Gemini receives domain metadata or evidence as
 input to a structured-output request. It has no Google Cloud credential and no direct database
 or MCP transport handle.
+
+## Domain routing and plan repair
+
+The first MCP discovery result is deliberately richer than a list of five internal names. Each
+domain card contains the business description, domain synonyms, and compact name/description/
+entity/grain/synonym metadata for every tagged concept. Across the five cards, all 22 outputs are
+represented before Gemini selects a domain. Detailed fields and metrics are disclosed only after
+routing.
+
+`QuestionPlanner` then normalizes the structured result. A `data` or `mixed` answer always means
+project data is required. When such a response contains no usable domain, all five governed
+domains are selected. This is a completeness fallback, not broader data permission: hierarchy,
+catalog, row, lookback, step, and byte limits still apply to every generated plan.
+
+An MCP validation rejection is returned as a typed tool result. The orchestrator allows exactly
+one repair call with the rejected semantic plan, the trusted catalog context, and the rejection
+reason. The replacement plan is not patched or trusted locally; it is resubmitted through the
+same complete MCP validation, compilation, dry-run, and execution boundary. A second rejection
+stops the request and produces a safe reference ID for logs.
 
 ## How a question becomes SQL
 
@@ -235,12 +265,27 @@ the application supplies the actual queried table list.
 For a general IAM question, no BigQuery query runs. Gemini may explain concepts, but the prompt
 forbids claiming that a project user, score, event, application, group, or trend exists.
 
+## Report generation and download security
+
+Report-format detection is deterministic string parsing in `iam_agent/reporting.py`; Gemini does
+not choose MIME types or construct files. CSV, XLSX, PDF, and DOCX exporters consume only the
+already-produced `ChatWorkflowResult`. They have no MCP client, BigQuery client, or IAM mutation
+capability. CSV and Excel values beginning with spreadsheet formula characters are escaped.
+
+Each file receives an opaque random ID and is stored in a bounded in-memory store for 15 minutes.
+`GET /web/reports/{report_id}` verifies a fresh Google web ID token and returns a file only when
+the token email exactly owns that report. The route returns the same 404 for missing, expired, or
+wrong-owner IDs and sets `Cache-Control: no-store`. Cloud Run is capped at one instance, but an
+instance restart still discards pending files; users should click the buttons immediately. This
+ephemeral design avoids Cloud SQL, GCS, and new secrets for the demo.
+
 ## Deliberately removed control plane
 
 The previous demonstration mixed analytics with remediation recommendation, Cloud SQL action
 state, approvals, and simulated IAM modification. Those modules, routes, dependencies, settings,
 tests, and deployment resources have been removed. `/google-chat/decisions/{action_id}` no longer
-exists, and the web interface renders text only.
+exists. Browser report export is a read-only presentation feature and does not reintroduce an
+action queue or control plane.
 
 If remediation is reintroduced later, it should be a separate control plane with its own
 authentication, approval state machine, credentials, audit store, connector allowlist, and

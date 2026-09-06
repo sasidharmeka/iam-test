@@ -94,6 +94,14 @@ def test_catalog_documents_all_22_pipeline_outputs() -> None:
         }.issubset(concept.fields)
         assert concept.metrics
 
+    domain_cards = catalog.domain_summaries()
+    routed_concepts = {
+        concept["name"]
+        for card in domain_cards.values()
+        for concept in card["concepts"]
+    }
+    assert routed_concepts == EXPECTED_OUTPUTS
+
 
 def test_every_catalog_concept_and_metric_compiles_through_the_same_boundary() -> None:
     _, catalog, _, validator, compiler = dependencies()

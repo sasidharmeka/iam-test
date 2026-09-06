@@ -8,6 +8,7 @@ from iam_agent.answerer import AnswerAgent
 from iam_agent.authorization import AuthorizationService, PrincipalGrant
 from iam_agent.config import Settings
 from iam_agent.conversation import ConversationStore
+from iam_agent.mcp_client import MCPToolError
 from iam_agent.models import (
     AnalysisPlan,
     AnalystAnswer,
@@ -73,12 +74,19 @@ class FakeModel:
 
 
 class FakeMCPClient:
-    def __init__(self):
+    def __init__(self, *, reject_first_plan: bool = False):
         self.described: list[list[IAMDomain]] = []
         self.plans: list[AnalysisPlan] = []
+        self.reject_first_plan = reject_first_plan
 
-    async def domain_summaries(self) -> dict[str, str]:
-        return {"identity_risk": "Risk scores and cross-signal findings"}
+    async def domain_summaries(self) -> dict[str, dict]:
+        return {
+            "identity_risk": {
+                "description": "Risk scores and cross-signal findings",
+                "synonyms": ["risky users"],
+                "concepts": [{"name": "risk_scores", "description": "Per-user risk"}],
+            }
+        }
 
     async def describe_domains(self, domains: list[IAMDomain]) -> dict:
         self.described.append(domains)
@@ -90,6 +98,8 @@ class FakeMCPClient:
     async def run_query(self, principal: str, plan: AnalysisPlan) -> EvidenceBundle:
         assert principal == "analyst@example.com"
         self.plans.append(plan)
+        if self.reject_first_plan and len(self.plans) == 1:
+            raise MCPToolError("Unknown metric 'risk' for concept 'risk_scores'")
         return EvidenceBundle(
             objective=plan.objective,
             queried_tables=["risk_scores"],
@@ -169,3 +179,57 @@ async def test_general_question_does_not_query_project_data(tmp_path) -> None:
     assert mcp.described == []
     assert mcp.plans == []
     assert model.response_models == [QuestionDecomposition, AnalystAnswer]
+
+
+@pytest.mark.asyncio
+async def test_rejected_plan_is_repaired_once_before_answering(tmp_path) -> None:
+    model = FakeModel(data_question=True)
+    mcp = FakeMCPClient(reject_first_plan=True)
+    orchestrator = build_orchestrator(tmp_path, model, mcp)
+
+    result = await orchestrator.answer(
+        actor=ChatActor(principal="analyst@example.com"),
+        question="Who is riskiest?",
+        conversation_key="repair-demo",
+    )
+
+    assert result.evidence is not None
+    assert len(mcp.plans) == 2
+    assert model.response_models == [
+        QuestionDecomposition,
+        AnalysisPlan,
+        AnalysisPlan,
+        AnalystAnswer,
+    ]
+
+
+class EmptyDomainModel(FakeModel):
+    async def generate_structured(self, *, system_instruction, prompt, response_model):
+        if response_model is QuestionDecomposition:
+            return QuestionDecomposition(
+                answer_mode=AnswerMode.DATA,
+                clarified_question="Tell me about user16",
+                domains=[],
+                entities=["user16"],
+                requires_project_data=True,
+            )
+        return await super().generate_structured(
+            system_instruction=system_instruction,
+            prompt=prompt,
+            response_model=response_model,
+        )
+
+
+@pytest.mark.asyncio
+async def test_data_question_with_no_model_domains_falls_back_to_all_catalog_domains() -> None:
+    planner = QuestionPlanner(EmptyDomainModel(data_question=True))
+    cards = {domain.value: {"description": domain.value, "concepts": []} for domain in IAMDomain}
+
+    decomposition = await planner.decompose(
+        question="Tell me about user16",
+        history=[],
+        domain_summaries=cards,
+    )
+
+    assert decomposition.requires_project_data is True
+    assert decomposition.domains == list(IAMDomain)

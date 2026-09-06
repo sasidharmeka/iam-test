@@ -21,7 +21,7 @@ class IAMEvidenceMCPClient:
     def __init__(self, server: MCPServer):
         self._server = server
         self._tool_names: tuple[str, ...] = ()
-        self._domain_cache: dict[str, str] = {}
+        self._domain_cache: dict[str, dict[str, Any]] = {}
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -34,14 +34,14 @@ class IAMEvidenceMCPClient:
             result = await client.call_tool("list_iam_domains")
         payload = self._payload(result)
         self._domain_cache = {
-            str(name): str(description) for name, description in payload.get("domains", {}).items()
+            str(name): dict(card) for name, card in payload.get("domains", {}).items()
         }
         required = {"list_iam_domains", "describe_iam_domains", "run_iam_query"}
         if not required.issubset(self._tool_names):
             missing = ", ".join(sorted(required - set(self._tool_names)))
             raise MCPToolError(f"IAM MCP server is missing required tools: {missing}")
 
-    async def domain_summaries(self) -> dict[str, str]:
+    async def domain_summaries(self) -> dict[str, dict[str, Any]]:
         if not self._domain_cache:
             await self.initialize()
         return dict(self._domain_cache)
@@ -58,7 +58,11 @@ class IAMEvidenceMCPClient:
             "run_iam_query",
             {"principal": principal, "plan": plan.model_dump(mode="json")},
         )
-        return EvidenceBundle.model_validate(self._payload(result))
+        payload = self._payload(result)
+        if payload.get("ok") is False:
+            raise MCPToolError(str(payload.get("error") or "The query plan was rejected"))
+        evidence = payload.get("evidence", payload)
+        return EvidenceBundle.model_validate(evidence)
 
     async def _call(self, name: str, arguments: dict[str, Any]):
         async with Client(self._server, raise_exceptions=True) as client:

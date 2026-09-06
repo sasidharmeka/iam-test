@@ -6,10 +6,11 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from iam_agent.answerer import AnswerAgent
@@ -28,6 +29,7 @@ from iam_agent.mcp_client import IAMEvidenceMCPClient
 from iam_agent.orchestrator import IAMOrchestrator
 from iam_agent.planner import QuestionPlanner
 from iam_agent.policy_rag import PolicyStore
+from iam_agent.reporting import ReportService, ReportStore
 from iam_mcp.bigquery_executor import BigQueryExecutor
 from iam_mcp.catalog import SemanticCatalog
 from iam_mcp.compiler import QueryCompiler
@@ -44,6 +46,7 @@ class Container:
     web_verifier: GoogleWebIdentityVerifier
     mcp_client: IAMEvidenceMCPClient
     chat: GoogleChatHandler
+    report_store: ReportStore
 
 
 class WebMessageRequest(BaseModel):
@@ -84,6 +87,7 @@ def build_container(settings: Settings | None = None) -> Container:
         executor=BigQueryExecutor(settings),
     )
     mcp_client = IAMEvidenceMCPClient(create_mcp_server(evidence_service))
+    report_store = ReportStore()
     orchestrator = IAMOrchestrator(
         settings=settings,
         authorization=authorization,
@@ -95,6 +99,7 @@ def build_container(settings: Settings | None = None) -> Container:
             max_sessions=settings.conversation_max_sessions,
             max_turns=settings.conversation_max_turns,
         ),
+        report_service=ReportService(report_store),
     )
     return Container(
         settings=settings,
@@ -103,6 +108,7 @@ def build_container(settings: Settings | None = None) -> Container:
         web_verifier=GoogleWebIdentityVerifier(settings),
         mcp_client=mcp_client,
         chat=GoogleChatHandler(orchestrator),
+        report_store=report_store,
     )
 
 
@@ -114,7 +120,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         yield
         await app.state.container.gemini.close()
 
-    app = FastAPI(title="Read-only IAM Analytics Agent", version="3.0.0", lifespan=lifespan)
+    app = FastAPI(title="Read-only IAM Analytics Agent", version="3.1.0", lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
@@ -163,7 +169,30 @@ def create_app(container: Container | None = None) -> FastAPI:
             },
             "space": {"name": "web-spaces/browser-demo"},
         }
-        return await runtime.chat.handle(event)
+        return await runtime.chat.handle(event, include_reports=True)
+
+    @app.get("/web/reports/{report_id}")
+    async def download_report(
+        report_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        runtime: Container = app.state.container
+        identity = await asyncio.to_thread(web_identity, runtime, authorization)
+        artifact = await runtime.report_store.get(report_id, identity["email"])
+        if artifact is None:
+            # Do not disclose whether a report exists for another signed-in identity.
+            raise HTTPException(status_code=404, detail="Report not found or expired")
+        return Response(
+            content=artifact.content,
+            media_type=artifact.mime_type,
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename*=UTF-8''" + quote(artifact.filename, safe="")
+                ),
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.post("/google-chat/events")
     async def google_chat_event(

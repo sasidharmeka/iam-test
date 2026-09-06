@@ -71,6 +71,11 @@ async def test_official_mcp_client_discovers_and_calls_read_only_tools() -> None
     )
     domains = await client.domain_summaries()
     assert "identity_risk" in domains
+    assert domains["identity_risk"]["concepts"]
+    assert any(
+        concept["name"] == "risk_scores"
+        for concept in domains["identity_risk"]["concepts"]
+    )
 
     plan = AnalysisPlan(
         objective="Rank users",
@@ -107,5 +112,5 @@ async def test_mcp_boundary_rejects_a_concept_absent_from_the_catalog() -> None:
         ],
     )
 
-    with pytest.raises(MCPToolError):
+    with pytest.raises(MCPToolError, match="Unknown IAM concept"):
         await client.run_query("analyst@example.com", plan)

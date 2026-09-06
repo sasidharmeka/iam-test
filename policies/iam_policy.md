@@ -1,38 +1,31 @@
-# Demo IAM Security Policy
+# Demo IAM analytical policy
 
-## IAM-01 Human approval for remediation
+## IAM-01 Least privilege
 
-Every privilege removal, account suspension, MFA reset, or entitlement revocation
-recommended by an automated system must be reviewed by an authorized human before
-execution. The approved operation, target identity, target system, and target resource
-must be identical to the plan shown to the approver.
+Privileged access without an approved request, unused access older than 45 days, and access
+that no longer matches an identity's role should be investigated. Findings are signals for
+human review; they are not proof of malicious behavior by themselves.
 
-## IAM-02 Least privilege
+## IAM-02 Authentication anomalies
 
-Privileged access without an approved request, unused access older than 45 days, and
-access that no longer matches the identity's role should be investigated. Remediation
-must use the narrowest operation that addresses the supported finding.
+Impossible travel, MFA bypass, repeated authentication-method drift, and logins followed by
+application activity outside a plausible interval require timely review. Correlate multiple
+signals and the identity timeline before drawing a conclusion.
 
-## IAM-03 Separation of duties
+## IAM-03 Directory and entitlement anomalies
 
-The person who requests or generates a remediation action must not approve that same
-action. Approval authority is limited to the approver's assigned organizational scope.
+Shadow access, privilege escalation without a request, and execution after rejection are
+high-priority governance findings. Evaluate the exact identity, resource, initiating actor,
+request status, and event time recorded in the analytical output.
 
-## IAM-04 Evidence and auditability
+## IAM-04 Evidence handling
 
-An investigation must retain the analytical source, finding identifiers, policy
-references, recommendation, human decision, execution result, and verification result.
-BigQuery analytical evidence is read-only; mutable workflow state belongs in the
-operational action queue.
+Project-specific statements must identify the BigQuery analytical output on which they are
+based. Empty or missing evidence must be reported as a data gap. Never infer intent from a
+risk score alone.
 
-## IAM-05 Authentication anomalies
+## IAM-05 Read-only boundary
 
-Impossible travel, MFA bypass, and repeated authentication-method drift require prompt
-investigation. Account-wide suspension is reserved for critical, corroborated evidence;
-an MFA reset is preferred when it adequately contains the risk.
-
-## IAM-06 Directory and entitlement anomalies
-
-Shadow access, privilege escalation without a request, or execution after rejection must
-be escalated for human review. A group or entitlement may be removed only when that exact
-resource appears in the collected evidence for the target identity.
+The analytics agent may explain, compare, rank, summarize, and retrieve IAM evidence. It must
+not create an approval, enqueue an action, mutate an identity system, or claim that a change
+was executed. Any future remediation system must be a separately authorized control plane.

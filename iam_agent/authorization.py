@@ -21,13 +21,8 @@ class PrincipalGrant(BaseModel):
 
 
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
-    UserRole.VIEWER: {Permission.VIEW_ACTION},
-    UserRole.ANALYST: {Permission.INVESTIGATE, Permission.VIEW_ACTION},
-    UserRole.APPROVER: {
-        Permission.INVESTIGATE,
-        Permission.VIEW_ACTION,
-        Permission.APPROVE,
-    },
+    UserRole.VIEWER: {Permission.QUERY},
+    UserRole.ANALYST: {Permission.QUERY},
     UserRole.ADMIN: set(Permission),
 }
 
@@ -61,6 +56,28 @@ class IdentityDirectory:
             target_user.casefold(), f"/company/unassigned/{target_user.casefold()}"
         )
 
+    def users_within(self, scope: str) -> list[str]:
+        """Return the catalogued identities visible below an organizational scope."""
+
+        return sorted(
+            user
+            for user, user_scope in self._identities.items()
+            if scope_contains(scope, user_scope)
+        )
+
+    def attributes_for(self, target_user: str) -> dict[str, str]:
+        """Expose safe virtual dimensions derived from the hierarchy path."""
+
+        parts = [part for part in PurePosixPath(self.scope_for(target_user)).parts if part != "/"]
+        return {
+            "department": parts[1] if len(parts) > 1 else "unassigned",
+            "job_role": parts[2] if len(parts) > 2 else "unassigned",
+            "organizational_scope": self.scope_for(target_user),
+        }
+
+    def directory_rows(self, scope: str) -> list[dict[str, str]]:
+        return [{"user": user, **self.attributes_for(user)} for user in self.users_within(scope)]
+
 
 class AuthorizationService:
     """Applies role permissions and ancestor-scope hierarchy checks."""
@@ -85,13 +102,11 @@ class AuthorizationService:
         path: str | Path,
         *,
         analysts: str = "",
-        approvers: str = "",
-        admins: str = "",
         default_scope: str = "/company",
     ) -> AuthorizationService:
         """Use deployment-provided principals, falling back to the versioned YAML file."""
 
-        if not any((analysts.strip(), approvers.strip(), admins.strip())):
+        if not analysts.strip():
             return cls.from_yaml(path)
 
         grants: list[PrincipalGrant] = []
@@ -99,13 +114,13 @@ class AuthorizationService:
             grants.append(
                 PrincipalGrant(principal=principal, role=UserRole.ANALYST, scope=default_scope)
             )
-        for principal in cls._principals(approvers):
-            grants.append(
-                PrincipalGrant(principal=principal, role=UserRole.APPROVER, scope=default_scope)
-            )
-        for principal in cls._principals(admins):
-            grants.append(PrincipalGrant(principal=principal, role=UserRole.ADMIN, scope="/"))
         return cls(grants)
+
+    def require_query(self, principal: str) -> PrincipalGrant:
+        grant = self.grant_for(principal)
+        if Permission.QUERY not in ROLE_PERMISSIONS[grant.role]:
+            raise AuthorizationError(f"Role {grant.role.value!r} cannot query IAM analytics")
+        return grant
 
     def grant_for(self, principal: str) -> PrincipalGrant:
         grant = self._grants.get(principal.casefold())

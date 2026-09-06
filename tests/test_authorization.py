@@ -3,10 +3,11 @@ import pytest
 from iam_agent.authorization import (
     AuthorizationError,
     AuthorizationService,
+    IdentityDirectory,
     PrincipalGrant,
     scope_contains,
 )
-from iam_agent.models import Permission, UserRole
+from iam_agent.models import UserRole
 
 
 def test_hierarchy_uses_path_segments() -> None:
@@ -14,7 +15,7 @@ def test_hierarchy_uses_path_segments() -> None:
     assert not scope_contains("/company/fin", "/company/finance")
 
 
-def test_analyst_can_investigate_but_cannot_approve() -> None:
+def test_registered_analyst_can_query() -> None:
     service = AuthorizationService(
         [
             PrincipalGrant(
@@ -24,23 +25,12 @@ def test_analyst_can_investigate_but_cannot_approve() -> None:
             )
         ]
     )
-    service.require("analyst@example.com", Permission.INVESTIGATE, "/company/finance/payments")
-    with pytest.raises(AuthorizationError):
-        service.require("analyst@example.com", Permission.APPROVE, "/company/finance/payments")
 
+    grant = service.require_query("analyst@example.com")
 
-def test_approver_cannot_cross_organizational_scope() -> None:
-    service = AuthorizationService(
-        [
-            PrincipalGrant(
-                principal="approver@example.com",
-                role=UserRole.APPROVER,
-                scope="/company/finance",
-            )
-        ]
-    )
+    assert grant.scope == "/company/finance"
     with pytest.raises(AuthorizationError):
-        service.require("approver@example.com", Permission.APPROVE, "/company/engineering")
+        service.require_query("unknown@example.com")
 
 
 def test_environment_principals_replace_yaml_examples(tmp_path) -> None:
@@ -55,29 +45,27 @@ def test_environment_principals_replace_yaml_examples(tmp_path) -> None:
 
     service = AuthorizationService.from_environment_or_yaml(
         config,
-        analysts="analyst@demo.test",
-        approvers="first@demo.test, second@demo.test",
-        admins="admin@demo.test",
+        analysts="first@demo.test, second@demo.test",
         default_scope="/company",
     )
 
-    assert service.grant_for("analyst@demo.test").role == UserRole.ANALYST
-    assert service.grant_for("second@demo.test").role == UserRole.APPROVER
-    assert service.grant_for("admin@demo.test").scope == "/"
+    assert service.grant_for("first@demo.test").role == UserRole.ANALYST
+    assert service.grant_for("second@demo.test").scope == "/company"
     with pytest.raises(AuthorizationError):
         service.grant_for("placeholder@example.com")
 
 
-def test_yaml_remains_local_fallback_when_environment_is_empty(tmp_path) -> None:
-    config = tmp_path / "authorization.yaml"
-    config.write_text(
-        "principals:\n"
-        "  - principal: local@example.com\n"
-        "    role: analyst\n"
-        "    scope: /company\n",
-        encoding="utf-8",
+def test_identity_directory_exposes_scoped_virtual_dimensions() -> None:
+    directory = IdentityDirectory(
+        {
+            "user1": "/company/finance/manager",
+            "user2": "/company/engineering/analyst",
+        }
     )
 
-    service = AuthorizationService.from_environment_or_yaml(config)
-
-    assert service.grant_for("local@example.com").role == UserRole.ANALYST
+    assert directory.users_within("/company/finance") == ["user1"]
+    assert directory.attributes_for("user2") == {
+        "department": "engineering",
+        "job_role": "analyst",
+        "organizational_scope": "/company/engineering/analyst",
+    }

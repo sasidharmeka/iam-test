@@ -1,4 +1,4 @@
-name: Deploy IAM Agent
+name: Deploy read-only IAM agent
 
 on:
   workflow_dispatch:
@@ -31,21 +31,18 @@ jobs:
       DEPLOY_SERVICE_ACCOUNT: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
       RUNTIME_SERVICE_ACCOUNT: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
       CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'iam-agent' }}
-      CLOUD_SQL_INSTANCE: ${{ vars.CLOUD_SQL_INSTANCE }}
-      DATABASE_SECRET: ${{ vars.DATABASE_SECRET || 'IAM_AGENT_DATABASE_URL' }}
       GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'us-central1' }}
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
       BIGQUERY_PROJECT: ${{ vars.BIGQUERY_PROJECT }}
       BIGQUERY_DATASET: ${{ vars.BIGQUERY_DATASET }}
-      BIGQUERY_ROWS_PER_TABLE: ${{ vars.BIGQUERY_ROWS_PER_TABLE || '5' }}
-      CHAT_ANALYST_PRINCIPALS: ${{ vars.CHAT_ANALYST_PRINCIPALS }}
-      CHAT_APPROVER_PRINCIPALS: ${{ vars.CHAT_APPROVER_PRINCIPALS }}
-      CHAT_ADMIN_PRINCIPALS: ${{ vars.CHAT_ADMIN_PRINCIPALS }}
-      CHAT_DEFAULT_SCOPE: ${{ vars.CHAT_DEFAULT_SCOPE || '/company' }}
+      QUERY_MAX_ROWS: ${{ vars.QUERY_MAX_ROWS || '500' }}
+      QUERY_MAX_BYTES_BILLED: ${{ vars.QUERY_MAX_BYTES_BILLED || '500000000' }}
+      QUERY_MAX_LOOKBACK_DAYS: ${{ vars.QUERY_MAX_LOOKBACK_DAYS || '90' }}
+      QUERY_MAX_STEPS: ${{ vars.QUERY_MAX_STEPS || '6' }}
       WEB_GOOGLE_CLIENT_ID: ${{ vars.WEB_GOOGLE_CLIENT_ID }}
       WEB_ANALYST_PRINCIPALS: ${{ vars.WEB_ANALYST_PRINCIPALS }}
-      WEB_APPROVER_PRINCIPALS: ${{ vars.WEB_APPROVER_PRINCIPALS }}
-      WEB_ADMIN_PRINCIPALS: ${{ vars.WEB_ADMIN_PRINCIPALS }}
+      CHAT_ANALYST_PRINCIPALS: ${{ vars.CHAT_ANALYST_PRINCIPALS }}
+      QUERY_DEFAULT_SCOPE: ${{ vars.QUERY_DEFAULT_SCOPE || '/company' }}
 
     steps:
       - name: Check out repository
@@ -65,8 +62,8 @@ jobs:
 
       - name: Run offline validation
         run: |
-          python -m compileall -q iam_agent main.py
-          ruff check iam_agent tests main.py
+          python -m compileall -q iam_agent iam_mcp main.py
+          ruff check iam_agent iam_mcp tests main.py
           python -m pytest -q
 
       - name: Validate GitHub Environment variables
@@ -78,8 +75,6 @@ jobs:
             WIF_PROVIDER
             DEPLOY_SERVICE_ACCOUNT
             RUNTIME_SERVICE_ACCOUNT
-            CLOUD_SQL_INSTANCE
-            DATABASE_SECRET
             BIGQUERY_PROJECT
             BIGQUERY_DATASET
             WEB_GOOGLE_CLIENT_ID
@@ -100,36 +95,23 @@ jobs:
             echo "::error::BIGQUERY_DATASET must contain only letters, digits, and underscores."
             exit 1
           fi
-          if [[ ! "${BIGQUERY_ROWS_PER_TABLE}" =~ ^[0-9]+$ ]] \
-            || (( BIGQUERY_ROWS_PER_TABLE < 1 || BIGQUERY_ROWS_PER_TABLE > 50 )); then
-            echo "::error::BIGQUERY_ROWS_PER_TABLE must be an integer from 1 through 50."
+          for name in QUERY_MAX_ROWS QUERY_MAX_BYTES_BILLED QUERY_MAX_LOOKBACK_DAYS QUERY_MAX_STEPS; do
+            if [[ ! "${!name}" =~ ^[0-9]+$ ]] || (( ${!name} < 1 )); then
+              echo "::error::${name} must be a positive integer."
+              exit 1
+            fi
+          done
+          if (( QUERY_MAX_ROWS > 5000 )); then
+            echo "::error::QUERY_MAX_ROWS cannot exceed the application limit of 5000."
             exit 1
           fi
-
-          IFS=: read -r sql_project sql_region sql_instance sql_extra <<< "${CLOUD_SQL_INSTANCE}"
-          if [[ -z "${sql_project}" || -z "${sql_region}" || -z "${sql_instance}" \
-            || -n "${sql_extra:-}" ]]; then
-            echo "::error::CLOUD_SQL_INSTANCE must be PROJECT:REGION:INSTANCE."
+          if (( QUERY_MAX_STEPS > 8 )); then
+            echo "::error::QUERY_MAX_STEPS cannot exceed the application limit of 8."
             exit 1
-          fi
-          if [[ "${sql_project}" != "${GCP_PROJECT_ID}" ]]; then
-            echo "::error::The Cloud SQL project must match GCP_PROJECT_ID."
-            exit 1
-          fi
-          if [[ "${sql_region}" != "${GCP_REGION}" ]]; then
-            echo "::error::Cloud SQL and Cloud Run must use the same region for this demo."
-            exit 1
-          fi
-          if [[ "${CHAT_ANALYST_PRINCIPALS}" == "${CHAT_APPROVER_PRINCIPALS}" ]]; then
-            echo "::warning::Use different analyst and approver accounts for separation of duties."
           fi
           if [[ ! "${WEB_GOOGLE_CLIENT_ID}" =~ ^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$ ]]; then
             echo "::error::WEB_GOOGLE_CLIENT_ID must be a Google OAuth web client ID."
             exit 1
-          fi
-          if [[ -n "${WEB_APPROVER_PRINCIPALS}" \
-            && "${WEB_ANALYST_PRINCIPALS}" == "${WEB_APPROVER_PRINCIPALS}" ]]; then
-            echo "::warning::A web user cannot approve an action they requested themselves."
           fi
 
       - name: Authenticate to Google Cloud with WIF
@@ -144,31 +126,14 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
 
-      - name: Enable required APIs
-        run: |
-          gcloud services enable \
-            aiplatform.googleapis.com \
-            artifactregistry.googleapis.com \
-            bigquery.googleapis.com \
-            chat.googleapis.com \
-            cloudbuild.googleapis.com \
-            run.googleapis.com \
-            secretmanager.googleapis.com \
-            sqladmin.googleapis.com \
-            --project="${GCP_PROJECT_ID}" \
-            --quiet
-
       - name: Check referenced Cloud resources
         shell: bash
         run: |
           set -euo pipefail
-          sql_instance="${CLOUD_SQL_INSTANCE##*:}"
           gcloud iam service-accounts describe "${RUNTIME_SERVICE_ACCOUNT}" \
             --project="${GCP_PROJECT_ID}" >/dev/null
-          gcloud sql instances describe "${sql_instance}" \
-            --project="${GCP_PROJECT_ID}" >/dev/null
-          gcloud secrets describe "${DATABASE_SECRET}" \
-            --project="${GCP_PROJECT_ID}" >/dev/null
+          bq --project_id="${BIGQUERY_PROJECT}" show "${BIGQUERY_PROJECT}:${BIGQUERY_DATASET}" \
+            >/dev/null
 
       - name: Deploy Cloud Run revision
         shell: bash
@@ -188,9 +153,7 @@ jobs:
             --min=0 \
             --max=1 \
             --no-allow-unauthenticated \
-            --add-cloudsql-instances="${CLOUD_SQL_INSTANCE}" \
-            --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}|GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION}|GEMINI_MODEL=${GEMINI_MODEL}|BIGQUERY_PROJECT=${BIGQUERY_PROJECT}|BIGQUERY_DATASET=${BIGQUERY_DATASET}|BIGQUERY_ROWS_PER_TABLE=${BIGQUERY_ROWS_PER_TABLE}|VERIFY_GOOGLE_CHAT_TOKEN=true|GOOGLE_CHAT_AUDIENCE=https://pending.invalid/google-chat/events|ENABLE_WEB_UI=true|WEB_GOOGLE_CLIENT_ID=${WEB_GOOGLE_CLIENT_ID}|WEB_ANALYST_PRINCIPALS=${WEB_ANALYST_PRINCIPALS}|WEB_APPROVER_PRINCIPALS=${WEB_APPROVER_PRINCIPALS}|WEB_ADMIN_PRINCIPALS=${WEB_ADMIN_PRINCIPALS}|CHAT_ANALYST_PRINCIPALS=${CHAT_ANALYST_PRINCIPALS}|CHAT_APPROVER_PRINCIPALS=${CHAT_APPROVER_PRINCIPALS}|CHAT_ADMIN_PRINCIPALS=${CHAT_ADMIN_PRINCIPALS}|CHAT_DEFAULT_SCOPE=${CHAT_DEFAULT_SCOPE}" \
-            --set-secrets="DATABASE_URL=${DATABASE_SECRET}:latest" \
+            --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}|GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION}|GEMINI_MODEL=${GEMINI_MODEL}|BIGQUERY_PROJECT=${BIGQUERY_PROJECT}|BIGQUERY_DATASET=${BIGQUERY_DATASET}|QUERY_MAX_ROWS=${QUERY_MAX_ROWS}|QUERY_MAX_BYTES_BILLED=${QUERY_MAX_BYTES_BILLED}|QUERY_MAX_LOOKBACK_DAYS=${QUERY_MAX_LOOKBACK_DAYS}|QUERY_MAX_STEPS=${QUERY_MAX_STEPS}|VERIFY_GOOGLE_CHAT_TOKEN=true|GOOGLE_CHAT_AUDIENCE=https://pending.invalid/google-chat/events|ENABLE_WEB_UI=true|WEB_GOOGLE_CLIENT_ID=${WEB_GOOGLE_CLIENT_ID}|WEB_ANALYST_PRINCIPALS=${WEB_ANALYST_PRINCIPALS}|CHAT_ANALYST_PRINCIPALS=${CHAT_ANALYST_PRINCIPALS}|QUERY_DEFAULT_SCOPE=${QUERY_DEFAULT_SCOPE}" \
             --quiet
 
       - name: Configure verified public endpoints
@@ -202,9 +165,8 @@ jobs:
             --region="${GCP_REGION}" \
             --format='value(status.url)')"
 
-          # The browser must reach the sign-in page before it has a Google ID token.
-          # Every state-changing route verifies either a Google user ID token or
-          # Google Chat's service-account ID token inside the application.
+          # The page is public so it can load before Google sign-in. Every message
+          # is authenticated in FastAPI with a Google ID token or Chat OIDC token.
           gcloud run services update "${CLOUD_RUN_SERVICE}" \
             --project="${GCP_PROJECT_ID}" \
             --region="${GCP_REGION}" \
@@ -212,7 +174,7 @@ jobs:
             --no-invoker-iam-check \
             --quiet
 
-      - name: Show endpoint and next step
+      - name: Show endpoints and next steps
         shell: bash
         run: |
           set -euo pipefail
@@ -221,15 +183,13 @@ jobs:
             --region="${GCP_REGION}" \
             --format='value(status.url)')"
           {
-            echo "## IAM Agent deployed"
+            echo "## Read-only IAM agent deployed"
             echo
-            echo "Cloud Run service: ${service_url}"
+            echo "Web interface: ${service_url}"
             echo
-            echo "Google Chat HTTP endpoint: ${service_url}/google-chat/events"
+            echo "Health check: ${service_url}/healthz"
             echo
-            echo "Gmail-authenticated web interface: ${service_url}"
+            echo "Optional Google Chat endpoint: ${service_url}/google-chat/events"
             echo
-            echo "OAuth authorized JavaScript origin: ${service_url}"
-            echo
-            echo "Register that endpoint in Google Chat API > Configuration."
+            echo "No Cloud SQL instance or database secret is used by this version."
           } >> "${GITHUB_STEP_SUMMARY}"

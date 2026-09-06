@@ -1,179 +1,160 @@
-# IAM Agent Platform
+# Read-only conversational IAM analytics agent
 
-Gemini-based IAM investigation and human-approved remediation service with both a
-personal-Gmail web interface and an optional Google Chat app.
-This repository is the agent layer for the analytics produced by
-[`sasidharmeka/IAM_NEW_1`](https://github.com/sasidharmeka/IAM_NEW_1).
+This repository turns the 22 BigQuery outputs produced by
+[`sasidharmeka/IAM_NEW_1`](https://github.com/sasidharmeka/IAM_NEW_1) into a
+conversational IAM analyst. A user can ask broad questions such as:
 
-The original regulatory-scanning/Telegram demo has been replaced by this workflow:
+- "Which users have the highest risk scores?"
+- "Why is user12 risky?"
+- "Compare MFA bypasses by application."
+- "What changed for user12 in the last 30 days?"
+- "Which Finance identities show role drift?"
+- "What is shadow access?"
+
+Gemini understands the question and creates a typed semantic plan. It never writes SQL. The
+MCP evidence service validates the plan against a versioned catalog, applies the user's
+hierarchy scope, compiles parameterized `SELECT` statements, checks their estimated BigQuery
+cost, and returns evidence. Gemini then explains that evidence in ordinary conversation.
+
+This version is intentionally read-only. It contains no remediation agent, approval gateway,
+action queue, deterministic IAM mutation tool, Cloud SQL dependency, or database secret.
+
+## Interfaces
+
+| Interface | Authentication | Intended users |
+| --- | --- | --- |
+| Browser UI at the Cloud Run base URL | Google Identity Services ID token | Personal Gmail or Workspace accounts listed in `WEB_ANALYST_PRINCIPALS` |
+| Optional Google Chat app | Google Chat OIDC token plus sender allowlist | Workspace users listed in `CHAT_ANALYST_PRINCIPALS` |
+
+Both interfaces call the same FastAPI handler, orchestrator, MCP tools, and BigQuery controls.
+
+## System at a glance
 
 ```mermaid
 flowchart TD
-    A["Gmail web UI or Google Chat"] --> B["FastAPI on Cloud Run"]
-    B --> C["Authentication and hierarchy authorization"]
-    C --> D["IAM orchestrator"]
-    D --> E["Gemini specialized agents"]
-    E --> F["Cloud SQL action_queue"]
-    F --> G["Web or Chat approval"]
-    G --> H["Approval gateway"]
-    H --> I["Deterministic IAM tool"]
-    I --> J["Simulated Saviynt / AD / Okta state"]
-    J --> K["Verification and audit trail"]
+    P["IAM_NEW_1 pipeline"] --> B["22 BigQuery outputs"]
+    U["Browser UI or Google Chat"] --> F["FastAPI + authorization"]
+    F --> O["IAM orchestrator"]
+    O <--> G["Gemini planner and answerer"]
+    O <--> M["In-process MCP evidence server"]
+    M --> C["Catalog + validator + SQL compiler"]
+    C --> B
 ```
 
-## What is implemented
+The MCP client and server use the official MCP Python SDK. They run in the same Cloud Run
+container, so MCP is a real protocol boundary without the cost or operational complexity of a
+second service. The tool contract can later be moved to a separate service without changing
+Gemini's semantic plan format.
 
-- FastAPI endpoint for `MESSAGE`, `ADDED_TO_SPACE`, `REMOVED_FROM_SPACE`, and
-  `CARD_CLICKED` Google Chat events.
-- Browser chat interface using Google Identity Services, with backend verification of the
-  Google ID token. Personal `@gmail.com` accounts are supported through an allowlist.
-- Mandatory in-app verification of Google Chat's OIDC token in the deployed service.
-- Role and hierarchy authorization (`viewer`, `analyst`, `approver`, `admin`).
-- Read-only, parameterized access to 18 user-scoped BigQuery outputs from `IAM_NEW_1`.
-- Investigation, policy/RAG, impact, and remediation agents using Gemini structured output.
-- Concurrent investigation/policy/impact calls; remediation waits for all three results.
-- PostgreSQL/Cloud SQL `action_queue`, `audit_events`, and simulated IAM state.
-- Approve/reject controls in the browser and Google Chat, separation of duties, idempotency,
-  and strict action state transitions.
-- Deterministic simulated execution for AD group removal, Saviynt access revocation, Okta
-  MFA reset, and Okta identity suspension.
-- Post-execution verification. Gemini cannot directly call an execution tool.
+## What is deterministic and what uses Gemini
 
-## Analytics input
+| Component | Responsibility |
+| --- | --- |
+| Gemini question planner | Resolves follow-ups, classifies general/data/mixed questions, and selects IAM domains |
+| MCP catalog tools | Expose approved domain, concept, field, dimension, metric, and grain descriptions |
+| Gemini query planner | Produces `AnalysisPlan` JSON using catalog vocabulary only |
+| Pydantic models | Reject malformed or structurally unsafe plans |
+| Query validator | Enforces catalog membership, organizational scope, row/time/step ceilings, and valid filters/sorts |
+| SQL compiler | Maps trusted concepts and metrics to fixed tables and SQL expressions; the only code that creates SQL |
+| BigQuery executor | Dry-runs each query, enforces bytes billed, executes read-only SQL, and returns rows |
+| Gemini answerer | Explains only the returned evidence and cites only queried outputs |
 
-`IAM_NEW_1` remains a separate upstream pipeline:
+Gemini can choose among allowed analytical building blocks, but cannot invent a table, metric
+expression, SQL fragment, or write operation.
+
+## Repository layout
 
 ```text
-Okta / Saviynt / AD / application activity / HR lifecycle
-    -> Pub/Sub and GCS
-    -> Spark transformations and IAM detections
-    -> BigQuery iam_data_dev tables
-    -> this service reads evidence by target identity
+iam_agent/
+  api.py                 FastAPI wiring and HTTP routes
+  authentication.py      Google web and Google Chat token verification
+  authorization.py       Principal allowlist and hierarchy scopes
+  planner.py             Gemini decomposition and semantic planning
+  answerer.py            General and evidence-grounded responses
+  orchestrator.py        Conversation workflow
+  mcp_client.py           Official in-process MCP client
+  conversation.py        Bounded in-memory follow-up context
+
+iam_mcp/
+  server.py              Three read-only MCP tools
+  catalog.py             Semantic catalog loader
+  validator.py           Plan, authorization, and resource validation
+  compiler.py            Deterministic semantic-plan-to-SQL compiler
+  bigquery_executor.py    Dry run, byte cap, and query execution
+  service.py             MCP application service
+
+config/
+  semantic_catalog.yaml  All 22 pipeline outputs and their schemas/descriptions
+  identities.yaml        Demo identity-to-hierarchy mapping
+  authorization.yaml     Local fallback principal mapping
 ```
 
-The BigQuery adapter uses a fixed table allowlist and named query parameters. It never
-executes SQL written by Gemini and never writes to BigQuery. The two main summary inputs
-are `risk_scores` and `identity_timelines`; anomaly evidence includes authentication,
-access/provisioning, application behavior, orphan, and time-warp detections.
+## MCP tools
 
-## Safety model
+| Tool | Input | Result | BigQuery access |
+| --- | --- | --- | --- |
+| `list_iam_domains` | None | Five compact domain descriptions | None |
+| `describe_iam_domains` | Selected domains | Relevant concepts, schemas, metrics, and rules | None |
+| `run_iam_query` | Verified principal plus typed `AnalysisPlan` | `EvidenceBundle` | Bounded `SELECT` only |
 
-1. The authenticated browser or Chat user must have `investigate` permission for the target's
-   organizational path.
-2. Gemini returns Pydantic-validated output and can choose only a fixed operation enum.
-3. The exact resource must appear in collected evidence for group or entitlement removal.
-4. The immutable plan is inserted with status `PENDING_APPROVAL`.
-5. A different human with `approve` permission over the target scope must click a button.
-6. The approval gateway runs the previously stored plan; it does not ask Gemini again.
-7. A fixed operation-to-tool map changes simulated state, verifies it, and appends audit
-   events.
+Gemini does not directly call BigQuery. The orchestrator makes MCP calls on Gemini's behalf and
+passes the returned metadata/evidence back into Gemini's next structured-output call.
 
-`no_action` is a valid Gemini recommendation. It never creates an approval request.
+## Five catalog domains
 
-## Project layout
+The 22 outputs are tagged into these discoverable topics. A concept can appear in more than one
+domain when it supports cross-domain questions.
 
-```text
-main.py                         Cloud Run / Uvicorn entry point
-iam_agent/api.py                FastAPI app and dependency wiring
-iam_agent/chat.py               Google Chat event and card handling
-iam_agent/authentication.py     Google web and Chat token verification
-iam_agent/web_ui.html           Personal-Gmail browser interface
-iam_agent/authorization.py      Role + hierarchy enforcement
-iam_agent/orchestrator.py       Agent workflow and safety validation
-iam_agent/evidence.py           BigQuery allowlisted evidence queries
-iam_agent/policy_rag.py         Version-controlled policy retrieval
-iam_agent/agents/               Four specialized Gemini agents
-iam_agent/repository.py         Cloud SQL action/audit/simulation persistence
-iam_agent/execution.py          Approval gateway + deterministic execution
-config/authorization.yaml       Chat principals, roles, and scopes
-config/identities.yaml          IAM identity organizational paths
-policies/iam_policy.md          Demo RAG policy corpus
-sql/schema.sql                  PostgreSQL schema reference
-tests/                          Offline unit tests
+| Domain | Examples of covered evidence |
+| --- | --- |
+| `identity_risk` | Risk scores, cleanest users, suspicious sequences, high-impact findings |
+| `authentication` | Impossible login/travel, MFA bypass, MFA drift, time-warp events |
+| `access_and_provisioning` | Role drift, stale access, privilege escalation, rejected-but-executed, shadow access |
+| `application_behavior` | Multi-app sessions, data transfer, application sequences, application usage |
+| `lifecycle_and_data_quality` | Orphan users/events, identity timelines, governance completeness |
+
+The catalog records each output's physical schema, business meaning, row grain, time field,
+user field, safe dimensions, safe filters, metrics, synonyms, and default display fields.
+
+## Quick deployment
+
+The complete first-time commands, GitHub variables, OAuth setup, verification commands, and
+troubleshooting guide are in [DEPLOYMENT.md](DEPLOYMENT.md). The shortest path is:
+
+```bash
+git clone https://github.com/sasidharmeka/multi-agent-iam-demo.git
+cd multi-agent-iam-demo
+chmod +x setup_iam_agent.sh
+./setup_iam_agent.sh 2>&1 | tee ~/setup_iam_agent.log
 ```
 
-## Local setup
+Then set the GitHub Environment variables printed by the script and run
+**Actions > Deploy read-only IAM agent > Run workflow**.
 
-Python 3.11 or newer is required.
+## Local tests
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-dev.txt
-cp .env.example .env
-gcloud auth application-default login
-uvicorn main:app --reload
+python -m pip install -r requirements-dev.txt
+ruff check iam_agent iam_mcp tests main.py
+pytest -q
 ```
 
-For local use, either replace the example principals in `config/authorization.yaml` or set
-the `WEB_*_PRINCIPALS`/`CHAT_*_PRINCIPALS` values in `.env`. Deployment uses environment
-variables, so no authorization file edit is required.
-
-Run the offline validation suite:
+Local end-to-end execution also needs Application Default Credentials with access to Gemini and
+the BigQuery dataset. Copy `.env.example` to `.env`, fill in the web identity settings if needed,
+then run:
 
 ```bash
-ruff check iam_agent tests main.py
-python -m pytest -q
+uvicorn main:app --reload --port 8080
 ```
 
-The tests do not call Gemini, BigQuery, Google Chat, or GCP.
+## Important data limitation
 
-## One-click Cloud Run deployment
+The agent can answer arbitrary questions that can be supported by the 22 outputs. It can also
+answer general IAM questions without claiming they describe this project. It cannot truthfully
+answer project-specific questions when the needed fact is absent from those outputs; in that
+case it reports the gap. Some pipeline jobs overwrite their output tables, so a request for a
+long historical trend is possible only when the relevant table actually retains that history.
 
-The repository includes `.github/workflows/deploy-agent.yml`. After its GitHub Environment
-variables are configured, use **Actions > Deploy IAM Agent > Run workflow**. The workflow
-runs tests, authenticates using WIF, deploys the scale-to-zero Cloud Run service, connects
-Cloud SQL and Secret Manager, enables application-authenticated HTTPS access, and prints both
-the Gmail web URL and Google Chat endpoint in the job summary.
-
-See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact variable list, one-time IAM prerequisites,
-Cloud SQL secret format, WIF repository binding, and Google Chat registration steps.
-
-### Manual alternative
-
-The runtime service account needs only:
-
-- Vertex/Gemini inference permission for the selected model platform.
-- `roles/bigquery.jobUser` on the project and BigQuery Data Viewer on `iam_data_dev`.
-- `roles/cloudsql.client` for the selected Cloud SQL PostgreSQL instance.
-- Secret Manager access only when `DATABASE_URL` is injected from a secret.
-
-Example deployment (replace the uppercase placeholders):
-
-```bash
-gcloud run deploy iam-agent \
-  --source . \
-  --project rapid-stage-506406-t4 \
-  --region us-central1 \
-  --service-account IAM_AGENT_RUNTIME_SERVICE_ACCOUNT \
-  --allow-unauthenticated \
-  --add-cloudsql-instances rapid-stage-506406-t4:us-central1:CLOUD_SQL_INSTANCE \
-  --set-env-vars BIGQUERY_PROJECT=rapid-stage-506406-t4,BIGQUERY_DATASET=iam_data_dev,GOOGLE_CLOUD_LOCATION=us-central1,GEMINI_MODEL=gemini-2.5-flash,ENABLE_WEB_UI=true,WEB_GOOGLE_CLIENT_ID=YOUR_WEB_CLIENT_ID,WEB_ANALYST_PRINCIPALS=YOUR_GMAIL,VERIFY_GOOGLE_CHAT_TOKEN=true,GOOGLE_CHAT_AUDIENCE=https://YOUR_CLOUD_RUN_URL/google-chat/events \
-  --set-secrets DATABASE_URL=IAM_AGENT_DATABASE_URL:latest
-```
-
-Public reachability is needed to display the login page. The browser message and decision
-routes still require a valid Google ID token and an allowlisted email. The Google Chat route
-requires Chat's Google-signed service-account token.
-
-In Google Chat API configuration:
-
-1. Enable interactive features.
-2. Select an HTTP endpoint.
-3. Use `https://YOUR_CLOUD_RUN_URL/google-chat/events` as the endpoint.
-4. Use the HTTP endpoint URL authentication audience.
-5. Restrict visibility to your test users or Workspace group.
-
-Google Chat requires a synchronous response within 30 seconds. The three independent
-analysis agents run concurrently to keep the demo within that window. If real datasets or
-models make the request slower, move investigation to Cloud Tasks and post the final card
-asynchronously through the Chat API.
-
-## Current execution boundary
-
-The final connectors deliberately modify `simulated_iam_state`, not real Saviynt, AD, or
-Okta. Replacing a simulator with a real connector should preserve the same typed operation
-contract, approval state machine, resource validation, verification, and audit calls.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the detailed execution trace and trust
-boundaries.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical sequence and safety invariants.

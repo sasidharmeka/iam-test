@@ -1,0 +1,82 @@
+"""Orchestrator-facing client for the in-process official MCP server."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from mcp.client import Client
+from mcp.server.mcpserver import MCPServer
+
+from iam_agent.models import AnalysisPlan, EvidenceBundle, IAMDomain
+
+
+class MCPToolError(RuntimeError):
+    pass
+
+
+class IAMEvidenceMCPClient:
+    """Uses MCP discovery/calls without adding a second Cloud Run service."""
+
+    def __init__(self, server: MCPServer):
+        self._server = server
+        self._tool_names: tuple[str, ...] = ()
+        self._domain_cache: dict[str, str] = {}
+
+    @property
+    def tool_names(self) -> tuple[str, ...]:
+        return self._tool_names
+
+    async def initialize(self) -> None:
+        async with Client(self._server, raise_exceptions=True) as client:
+            listing = await client.list_tools()
+            self._tool_names = tuple(tool.name for tool in listing.tools)
+            result = await client.call_tool("list_iam_domains")
+        payload = self._payload(result)
+        self._domain_cache = {
+            str(name): str(description) for name, description in payload.get("domains", {}).items()
+        }
+        required = {"list_iam_domains", "describe_iam_domains", "run_iam_query"}
+        if not required.issubset(self._tool_names):
+            missing = ", ".join(sorted(required - set(self._tool_names)))
+            raise MCPToolError(f"IAM MCP server is missing required tools: {missing}")
+
+    async def domain_summaries(self) -> dict[str, str]:
+        if not self._domain_cache:
+            await self.initialize()
+        return dict(self._domain_cache)
+
+    async def describe_domains(self, domains: list[IAMDomain]) -> dict[str, Any]:
+        result = await self._call(
+            "describe_iam_domains",
+            {"domains": [domain.value for domain in domains]},
+        )
+        return self._payload(result)
+
+    async def run_query(self, principal: str, plan: AnalysisPlan) -> EvidenceBundle:
+        result = await self._call(
+            "run_iam_query",
+            {"principal": principal, "plan": plan.model_dump(mode="json")},
+        )
+        return EvidenceBundle.model_validate(self._payload(result))
+
+    async def _call(self, name: str, arguments: dict[str, Any]):
+        async with Client(self._server, raise_exceptions=True) as client:
+            result = await client.call_tool(name, arguments)
+        if getattr(result, "is_error", False):
+            messages = [getattr(item, "text", "") for item in result.content]
+            raise MCPToolError(" ".join(message for message in messages if message))
+        return result
+
+    @staticmethod
+    def _payload(result) -> dict[str, Any]:
+        payload = getattr(result, "structured_content", None)
+        if isinstance(payload, dict):
+            return payload
+        for item in getattr(result, "content", []):
+            text = getattr(item, "text", None)
+            if text:
+                decoded = json.loads(text)
+                if isinstance(decoded, dict):
+                    return decoded
+        raise MCPToolError("IAM MCP tool returned no structured JSON object")

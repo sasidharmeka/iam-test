@@ -1,4 +1,4 @@
-"""FastAPI application factory for Cloud Run."""
+"""FastAPI application factory for the read-only Cloud Run service."""
 
 from __future__ import annotations
 
@@ -12,12 +12,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-from iam_agent.agents import (
-    ImpactAnalysisAgent,
-    InvestigationAgent,
-    PolicyAgent,
-    RemediationAgent,
-)
+from iam_agent.answerer import AnswerAgent
 from iam_agent.authentication import (
     ChatAuthenticationError,
     GoogleChatRequestVerifier,
@@ -27,30 +22,32 @@ from iam_agent.authentication import (
 from iam_agent.authorization import AuthorizationService, IdentityDirectory
 from iam_agent.chat import GoogleChatHandler
 from iam_agent.config import Settings, get_settings
-from iam_agent.evidence import BigQueryEvidenceProvider
-from iam_agent.execution import ApprovalGateway, DeterministicIAMExecutor
+from iam_agent.conversation import ConversationStore
 from iam_agent.gemini import GeminiClient
-from iam_agent.orchestrator import IAMOrchestrator, IntentRouter
+from iam_agent.mcp_client import IAMEvidenceMCPClient
+from iam_agent.orchestrator import IAMOrchestrator
+from iam_agent.planner import QuestionPlanner
 from iam_agent.policy_rag import PolicyStore
-from iam_agent.repository import SQLActionRepository
+from iam_mcp.bigquery_executor import BigQueryExecutor
+from iam_mcp.catalog import SemanticCatalog
+from iam_mcp.compiler import QueryCompiler
+from iam_mcp.server import create_mcp_server
+from iam_mcp.service import IAMEvidenceService
+from iam_mcp.validator import QueryPlanValidator
 
 
 @dataclass
 class Container:
     settings: Settings
-    repository: SQLActionRepository
     gemini: GeminiClient
     verifier: GoogleChatRequestVerifier
     web_verifier: GoogleWebIdentityVerifier
+    mcp_client: IAMEvidenceMCPClient
     chat: GoogleChatHandler
 
 
 class WebMessageRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=1000)
-
-
-class WebDecisionRequest(BaseModel):
-    approve: bool
+    text: str = Field(min_length=1, max_length=2000)
 
 
 WEB_UI_PATH = Path(__file__).with_name("web_ui.html")
@@ -62,48 +59,50 @@ def _merge_principals(*values: str) -> str:
 
 def build_container(settings: Settings | None = None) -> Container:
     settings = settings or get_settings()
-    repository = SQLActionRepository(settings.database_url)
     authorization = AuthorizationService.from_environment_or_yaml(
         settings.authorization_config,
         analysts=_merge_principals(
             settings.chat_analyst_principals,
             settings.web_analyst_principals,
         ),
-        approvers=_merge_principals(
-            settings.chat_approver_principals,
-            settings.web_approver_principals,
-        ),
-        admins=_merge_principals(
-            settings.chat_admin_principals,
-            settings.web_admin_principals,
-        ),
-        default_scope=settings.chat_default_scope,
+        default_scope=settings.query_default_scope,
     )
     identities = IdentityDirectory.from_yaml(settings.identity_directory_config)
+    catalog = SemanticCatalog.from_yaml(settings.semantic_catalog_config)
     gemini = GeminiClient(settings)
-    evidence = BigQueryEvidenceProvider(settings)
-    policy_store = PolicyStore(settings.policy_directory)
-    orchestrator = IAMOrchestrator(
-        evidence=evidence,
+    validator = QueryPlanValidator(
+        settings=settings,
+        catalog=catalog,
         authorization=authorization,
         identities=identities,
-        policy_store=policy_store,
-        repository=repository,
-        intent_router=IntentRouter(gemini),
-        investigation_agent=InvestigationAgent(gemini),
-        policy_agent=PolicyAgent(gemini),
-        impact_agent=ImpactAnalysisAgent(gemini),
-        remediation_agent=RemediationAgent(gemini),
     )
-    executor = DeterministicIAMExecutor(repository)
-    approvals = ApprovalGateway(repository, authorization, executor)
+    compiler = QueryCompiler(settings=settings, catalog=catalog, identities=identities)
+    evidence_service = IAMEvidenceService(
+        catalog=catalog,
+        validator=validator,
+        compiler=compiler,
+        executor=BigQueryExecutor(settings),
+    )
+    mcp_client = IAMEvidenceMCPClient(create_mcp_server(evidence_service))
+    orchestrator = IAMOrchestrator(
+        settings=settings,
+        authorization=authorization,
+        policy_store=PolicyStore(settings.policy_directory),
+        mcp_client=mcp_client,
+        planner=QuestionPlanner(gemini),
+        answerer=AnswerAgent(gemini),
+        conversations=ConversationStore(
+            max_sessions=settings.conversation_max_sessions,
+            max_turns=settings.conversation_max_turns,
+        ),
+    )
     return Container(
         settings=settings,
-        repository=repository,
         gemini=gemini,
         verifier=GoogleChatRequestVerifier(settings),
         web_verifier=GoogleWebIdentityVerifier(settings),
-        chat=GoogleChatHandler(orchestrator, approvals),
+        mcp_client=mcp_client,
+        chat=GoogleChatHandler(orchestrator),
     )
 
 
@@ -111,15 +110,20 @@ def create_app(container: Container | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.container = container or build_container()
-        await asyncio.to_thread(app.state.container.repository.create_schema)
+        await app.state.container.mcp_client.initialize()
         yield
         await app.state.container.gemini.close()
 
-    app = FastAPI(title="IAM Agent Platform", version="2.0.0", lifespan=lifespan)
+    app = FastAPI(title="Read-only IAM Analytics Agent", version="3.0.0", lifespan=lifespan)
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz() -> dict[str, object]:
+        runtime: Container = app.state.container
+        return {
+            "status": "ok",
+            "mode": "read-only",
+            "mcp_tools": list(runtime.mcp_client.tool_names),
+        }
 
     def web_identity(runtime: Container, authorization: str | None) -> dict[str, str]:
         try:
@@ -158,29 +162,6 @@ def create_app(container: Container | None = None) -> FastAPI:
                 "name": f"web-messages/{uuid4()}",
             },
             "space": {"name": "web-spaces/browser-demo"},
-        }
-        return await runtime.chat.handle(event)
-
-    @app.post("/web/actions/{action_id}/decision")
-    async def web_decision(
-        action_id: str,
-        request: WebDecisionRequest,
-        authorization: str | None = Header(default=None),
-    ) -> dict:
-        runtime: Container = app.state.container
-        identity = await asyncio.to_thread(web_identity, runtime, authorization)
-        event = {
-            "type": "CARD_CLICKED",
-            "source": "Gmail web interface",
-            "user": {
-                "email": identity["email"],
-                "displayName": identity["name"],
-                "name": f"web-users/{identity['email']}",
-            },
-            "common": {
-                "invokedFunction": "approve_action" if request.approve else "reject_action",
-                "parameters": {"action_id": action_id},
-            },
         }
         return await runtime.chat.handle(event)
 

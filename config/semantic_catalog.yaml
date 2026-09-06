@@ -1,0 +1,534 @@
+version: 1
+
+domains:
+  identity_risk:
+    description: Calculated identity risk, risk contributors, clean identities, and cross-source timelines.
+    synonyms: [risky users, risk score, identity summary, user timeline]
+  authentication:
+    description: Login, MFA, geographic travel, and authentication-method anomalies.
+    synonyms: [login, sign in, MFA, travel, authentication]
+  access_and_provisioning:
+    description: Privilege, entitlement, approval, directory-group, and provisioning anomalies.
+    synonyms: [access, role, group, Saviynt, Active Directory, privilege]
+  application_behavior:
+    description: Application sessions, application sequences, and unusual data movement.
+    synonyms: [application usage, session, data transfer, app behavior]
+  lifecycle_and_data_quality:
+    description: Orphan identities, unmatched events, and cross-system lifecycle inconsistencies.
+    synonyms: [orphan, leaver, lifecycle, data quality, time warp]
+
+virtual_dimensions:
+  department:
+    type: string
+    description: Department derived from the versioned identity hierarchy.
+    dimension: true
+  job_role:
+    type: string
+    description: Job role derived from the versioned identity hierarchy.
+    dimension: true
+  organizational_scope:
+    type: string
+    description: Full authorization scope derived from the identity hierarchy.
+    dimension: true
+
+common_fields:
+  detection_name:
+    type: string
+    description: Stable name of the Spark detection that produced the row.
+    dimension: true
+  finding_id:
+    type: string
+    description: Deterministic identifier for the finding.
+    dimension: true
+  event_date:
+    type: date
+    description: Calendar date of the source event or calculated finding.
+    dimension: true
+  pipeline_run_id:
+    type: string
+    description: Identifier of the pipeline run that produced the row.
+    dimension: true
+  detected_at:
+    type: timestamp
+    description: UTC timestamp when the Spark pipeline calculated the finding.
+    dimension: true
+
+concepts:
+  impossible_login_anomalies:
+    table: impossible_login_anomalies
+    description: Application activity that occurred before its corresponding successful login.
+    grain: One impossible-login correlation between one login and one application-usage event.
+    domains: [authentication, application_behavior]
+    entity: authentication_event
+    user_field: user
+    fields:
+      user: {type: string, description: Identity associated with the login and usage event, dimension: true}
+      usage_id: {type: string, description: Source application-usage event identifier, dimension: true}
+      session_id: {type: string, description: Application session identifier, dimension: true}
+      app: {type: string, description: Application accessed, dimension: true}
+      login_time: {type: timestamp, description: Timestamp of the related login, dimension: true}
+      app_access_time: {type: timestamp, description: Timestamp of the application access, dimension: true}
+      seconds_from_login: {type: integer, description: Signed seconds between login and application access, dimension: false}
+      anomaly_reason: {type: string, description: Deterministic explanation for the anomaly, dimension: true}
+    metrics:
+      finding_count: {description: Number of impossible-login findings, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities with impossible-login findings, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+    default_fields: [user, app, login_time, app_access_time, seconds_from_login, anomaly_reason, finding_id, event_date]
+    synonyms: [impossible login, access before login, login ordering anomaly]
+
+  mfa_bypass_events:
+    table: mfa_bypass_events
+    description: Application access shortly after a failed MFA authentication attempt.
+    grain: One failed-MFA event correlated with one subsequent application-usage event.
+    domains: [authentication, application_behavior]
+    entity: authentication_event
+    user_field: user
+    fields:
+      user: {type: string, description: Identity associated with the MFA failure and application access, dimension: true}
+      failed_request_id: {type: string, description: Identifier of the failed authentication request, dimension: true}
+      usage_id: {type: string, description: Identifier of the correlated application-usage event, dimension: true}
+      failed_session_id: {type: string, description: Session identifier of the failed authentication, dimension: true}
+      app_session_id: {type: string, description: Session identifier of the application access, dimension: true}
+      failure_status: {type: string, description: Authentication failure status, dimension: true}
+      mfa_failure_time: {type: timestamp, description: Timestamp of the failed MFA attempt, dimension: true}
+      app: {type: string, description: Application accessed after the failed MFA attempt, dimension: true}
+      app_access_time: {type: timestamp, description: Timestamp of the application access, dimension: true}
+      seconds_after_failure: {type: integer, description: Seconds between the MFA failure and application access, dimension: false}
+    metrics:
+      finding_count: {description: Number of MFA-bypass findings, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities with MFA-bypass findings, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      affected_application_count: {description: Distinct applications involved in MFA-bypass findings, expression: "COUNT(DISTINCT t.`app`)", result_type: integer}
+    default_fields: [user, app, failure_status, mfa_failure_time, app_access_time, seconds_after_failure, finding_id, event_date]
+    synonyms: [MFA bypass, accessed after failed MFA, second factor bypass]
+
+  mfa_bypass_events_all_apps:
+    table: mfa_bypass_events_all_apps
+    description: Per-user summary of all applications accessed after a failed MFA event.
+    grain: One failed-MFA request summarized across all subsequent application events for one identity.
+    domains: [authentication, application_behavior]
+    entity: authentication_event
+    user_field: user
+    fields:
+      user: {type: string, description: Identity associated with the failed MFA request, dimension: true}
+      failed_request_id: {type: string, description: Identifier of the failed authentication request, dimension: true}
+      mfa_failure_time: {type: timestamp, description: Timestamp of the failed MFA attempt, dimension: true}
+      failure_status: {type: string, description: Authentication failure status, dimension: true}
+      applications_accessed: {type: array_string, description: Applications reached after the failed attempt, dimension: false, filterable: false}
+      usage_event_count: {type: integer, description: Number of subsequent application-usage events, dimension: false}
+      first_app_access_time: {type: timestamp, description: First subsequent application-access timestamp, dimension: true}
+      last_app_access_time: {type: timestamp, description: Last subsequent application-access timestamp, dimension: true}
+    metrics:
+      finding_count: {description: Number of summarized failed-MFA episodes, expression: "COUNT(*)", result_type: integer}
+      total_usage_events: {description: Total application-usage events after failed MFA, expression: "SUM(t.`usage_event_count`)", result_type: integer}
+      affected_identity_count: {description: Distinct affected identities, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+    default_fields: [user, failed_request_id, failure_status, applications_accessed, usage_event_count, first_app_access_time, last_app_access_time, finding_id]
+    synonyms: [all apps after MFA failure, post-MFA application spread]
+
+  impossible_travel_events:
+    table: impossible_travel_events
+    description: Consecutive logins whose locations require implausible travel speed.
+    grain: One pair of consecutive login events for one identity that exceeds the travel threshold.
+    domains: [authentication, identity_risk]
+    entity: authentication_event
+    user_field: user
+    fields:
+      user: {type: string, description: Identity associated with both login events, dimension: true}
+      req_id: {type: string, description: Current login request identifier, dimension: true}
+      previous_country: {type: string, description: Country of the preceding login, dimension: true}
+      current_country: {type: string, description: Country of the current login, dimension: true}
+      previous_login_ts: {type: timestamp, description: Timestamp of the preceding login, dimension: true}
+      current_login_ts: {type: timestamp, description: Timestamp of the current login, dimension: true}
+      seconds_between: {type: integer, description: Seconds between the two logins, dimension: false}
+      distance_km: {type: float, description: Approximate distance between login countries, dimension: false}
+      required_speed_kmh: {type: float, description: Travel speed required to make both logins possible, dimension: false}
+    metrics:
+      finding_count: {description: Number of impossible-travel findings, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities with impossible-travel findings, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      maximum_required_speed_kmh: {description: Highest calculated required travel speed, expression: "MAX(t.`required_speed_kmh`)", result_type: float}
+    default_fields: [user, previous_country, current_country, previous_login_ts, current_login_ts, required_speed_kmh, finding_id]
+    synonyms: [impossible travel, geographic login anomaly, unrealistic travel speed]
+
+  privilege_escalation_without_request:
+    table: privilege_escalation_without_request
+    description: Privileged directory-group additions without a matching approved access request.
+    grain: One privileged group-add event without an approved request for one identity.
+    domains: [access_and_provisioning, identity_risk]
+    entity: access_event
+    user_field: user
+    fields:
+      user: {type: string, description: Identity receiving the privileged group membership, dimension: true}
+      event_id: {type: string, description: Directory event identifier, dimension: true}
+      request_id: {type: string, description: Related request identifier when present, dimension: true}
+      group: {type: string, description: Privileged directory group, dimension: true}
+      initiator: {type: string, description: Actor or service that initiated the group change, dimension: true}
+      escalation_time: {type: timestamp, description: Timestamp of the privilege escalation, dimension: true}
+    metrics:
+      finding_count: {description: Number of unrequested privilege escalations, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities receiving unrequested privilege, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      affected_group_count: {description: Distinct privileged groups involved, expression: "COUNT(DISTINCT t.`group`)", result_type: integer}
+    default_fields: [user, group, initiator, escalation_time, request_id, finding_id, event_date]
+    synonyms: [unrequested privilege, privilege escalation, unauthorized group addition]
+
+  ad_volume_spikes:
+    table: ad_volume_spikes
+    description: Daily Active Directory action volumes that exceed their rolling baseline.
+    grain: One anomalous action and activity-date combination for the organization.
+    domains: [access_and_provisioning]
+    entity: organization
+    user_field: null
+    fields:
+      activity_date: {type: date, description: Date on which the directory actions occurred, dimension: true}
+      action: {type: string, description: Directory action whose volume spiked, dimension: true}
+      event_count: {type: integer, description: Directory events observed on the activity date, dimension: false}
+      rolling_average: {type: float, description: Historical rolling-average event count, dimension: false}
+      history_days: {type: integer, description: Number of days contributing to the baseline, dimension: false}
+    metrics:
+      finding_count: {description: Number of detected AD volume spikes, expression: "COUNT(*)", result_type: integer}
+      total_ad_events: {description: Total events represented by spike findings, expression: "SUM(t.`event_count`)", result_type: integer}
+      maximum_event_count: {description: Largest daily event count in a spike, expression: "MAX(t.`event_count`)", result_type: integer}
+    default_fields: [activity_date, action, event_count, rolling_average, history_days, finding_id]
+    synonyms: [AD spike, directory volume, unusual group activity volume]
+
+  rejected_but_executed:
+    table: rejected_but_executed
+    description: Rejected Saviynt requests whose corresponding directory changes were still executed.
+    grain: One rejected request correlated with one executed directory event for one identity.
+    domains: [access_and_provisioning, identity_risk]
+    entity: access_request
+    user_field: user
+    fields:
+      user: {type: string, description: Identity named by the request and execution, dimension: true}
+      event_id: {type: string, description: Executed directory-event identifier, dimension: true}
+      request_id: {type: string, description: Rejected access-request identifier, dimension: true}
+      request_status: {type: string, description: Final status of the access request, dimension: true}
+      requested_app: {type: string, description: Application requested in Saviynt, dimension: true}
+      requested_role: {type: string, description: Role requested in Saviynt, dimension: true}
+      decision_time: {type: timestamp, description: Timestamp of the rejection decision, dimension: true}
+      executed_group: {type: string, description: Directory group changed despite the rejection, dimension: true}
+      executed_action: {type: string, description: Directory action that was executed, dimension: true}
+      execution_time: {type: timestamp, description: Timestamp of the executed directory change, dimension: true}
+    metrics:
+      finding_count: {description: Number of rejected-but-executed findings, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities affected, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      affected_application_count: {description: Distinct requested applications involved, expression: "COUNT(DISTINCT t.`requested_app`)", result_type: integer}
+    default_fields: [user, request_id, requested_app, requested_role, executed_group, executed_action, decision_time, execution_time, finding_id]
+    synonyms: [rejected request executed, denied but provisioned, rejection control failure]
+
+  high_risk_sequence:
+    table: high_risk_sequence
+    description: High-risk ordered application sequences within a single user session.
+    grain: One detected three-application sequence for one identity and session.
+    domains: [application_behavior, identity_risk]
+    entity: session
+    user_field: user
+    fields:
+      user: {type: string, description: Identity associated with the application sequence, dimension: true}
+      usage_id: {type: string, description: Source usage-event identifier, dimension: true}
+      session_id: {type: string, description: Session containing the sequence, dimension: true}
+      previous_app: {type: string, description: First application in the sequence, dimension: true}
+      current_app: {type: string, description: Second application in the sequence, dimension: true}
+      next_app: {type: string, description: Third application in the sequence, dimension: true}
+      sequence_time: {type: timestamp, description: Timestamp assigned to the detected sequence, dimension: true}
+    metrics:
+      finding_count: {description: Number of high-risk application sequences, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities with high-risk sequences, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      affected_session_count: {description: Distinct sessions containing high-risk sequences, expression: "COUNT(DISTINCT t.`session_id`)", result_type: integer}
+    default_fields: [user, session_id, previous_app, current_app, next_app, sequence_time, finding_id]
+    synonyms: [suspicious app sequence, risky application path]
+
+  excessive_data_transferred:
+    table: excessive_data_transferred
+    description: Per-user daily application-data transfer totals that exceed the rolling baseline.
+    grain: One anomalous identity and activity-date combination.
+    domains: [application_behavior, identity_risk]
+    entity: identity
+    user_field: user
+    fields:
+      user: {type: string, description: Identity associated with the data transfer, dimension: true}
+      activity_date: {type: date, description: Date of the aggregated application activity, dimension: true}
+      total_data_mb: {type: float, description: Total megabytes transferred by the identity that day, dimension: false}
+      rolling_average_mb: {type: float, description: Historical rolling-average daily transfer, dimension: false}
+      history_days: {type: integer, description: Number of days contributing to the baseline, dimension: false}
+    metrics:
+      finding_count: {description: Number of excessive-transfer findings, expression: "COUNT(*)", result_type: integer}
+      total_data_mb: {description: Total megabytes represented by the findings, expression: "SUM(t.`total_data_mb`)", result_type: float}
+      maximum_daily_data_mb: {description: Largest anomalous daily transfer, expression: "MAX(t.`total_data_mb`)", result_type: float}
+      affected_identity_count: {description: Distinct identities with excessive transfers, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+    default_fields: [user, activity_date, total_data_mb, rolling_average_mb, history_days, finding_id]
+    synonyms: [data exfiltration, excessive download, unusual data volume]
+
+  role_drift:
+    table: role_drift
+    description: Identities whose observed application role changed across the analysis period.
+    grain: One identity and application with more than one observed role.
+    domains: [access_and_provisioning, identity_risk]
+    entity: identity
+    user_field: user
+    fields:
+      user: {type: string, description: Identity whose application role changed, dimension: true}
+      app: {type: string, description: Application in which the role changed, dimension: true}
+      first_role: {type: string, description: Earliest observed role, dimension: true}
+      latest_role: {type: string, description: Most recently observed role, dimension: true}
+      first_seen: {type: timestamp, description: First role-observation timestamp, dimension: true}
+      last_seen: {type: timestamp, description: Latest role-observation timestamp, dimension: true}
+      distinct_roles: {type: integer, description: Number of distinct observed roles, dimension: false}
+    metrics:
+      finding_count: {description: Number of identity-application role-drift findings, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities with role drift, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      maximum_distinct_roles: {description: Largest number of roles observed for one finding, expression: "MAX(t.`distinct_roles`)", result_type: integer}
+    default_fields: [user, app, first_role, latest_role, distinct_roles, first_seen, last_seen, finding_id]
+    synonyms: [role changed, permission drift, entitlement drift]
+
+  stale_access:
+    table: stale_access
+    description: Granted application access that has not been used within the inactivity threshold.
+    grain: One stale identity and application access relationship.
+    domains: [access_and_provisioning, identity_risk]
+    entity: identity
+    user_field: user
+    fields:
+      user: {type: string, description: Identity holding the stale access, dimension: true}
+      app: {type: string, description: Application for which access is stale, dimension: true}
+      latest_grant_time: {type: timestamp, description: Most recent access-grant timestamp, dimension: true}
+      latest_role: {type: string, description: Most recent granted application role, dimension: true}
+      last_used_time: {type: timestamp, description: Most recent observed application-use timestamp, dimension: true}
+      as_of_time: {type: timestamp, description: Reference timestamp used for inactivity calculation, dimension: true}
+      inactive_days: {type: integer, description: Calculated number of inactive days, dimension: false}
+    metrics:
+      finding_count: {description: Number of stale access relationships, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities with stale access, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      average_inactive_days: {description: Average inactivity period, expression: "AVG(t.`inactive_days`)", result_type: float}
+      maximum_inactive_days: {description: Longest inactivity period, expression: "MAX(t.`inactive_days`)", result_type: integer}
+    default_fields: [user, app, latest_role, latest_grant_time, last_used_time, inactive_days, finding_id]
+    synonyms: [unused access, dormant entitlement, inactive permission]
+
+  multi_app_single_session:
+    table: multi_app_single_session
+    description: Sessions in which one identity accessed multiple distinct applications.
+    grain: One identity and session summarized across its accessed applications.
+    domains: [application_behavior, identity_risk]
+    entity: session
+    user_field: user
+    fields:
+      user: {type: string, description: Identity associated with the session, dimension: true}
+      session_id: {type: string, description: Multi-application session identifier, dimension: true}
+      application_count: {type: integer, description: Distinct applications accessed in the session, dimension: false}
+      applications: {type: array_string, description: Applications accessed during the session, dimension: false, filterable: false}
+      session_start: {type: timestamp, description: First application event in the session, dimension: true}
+      session_end: {type: timestamp, description: Last application event in the session, dimension: true}
+    metrics:
+      finding_count: {description: Number of multi-application sessions, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities with multi-application sessions, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      average_application_count: {description: Average applications per detected session, expression: "AVG(t.`application_count`)", result_type: float}
+      maximum_application_count: {description: Largest applications-per-session count, expression: "MAX(t.`application_count`)", result_type: integer}
+    default_fields: [user, session_id, application_count, applications, session_start, session_end, finding_id]
+    synonyms: [many apps one session, cross-application session]
+
+  mfa_drift:
+    table: mfa_drift
+    description: Identities whose observed MFA method changed and whose authentication history includes failures.
+    grain: One identity summarized across its observed MFA methods and authentication attempts.
+    domains: [authentication, identity_risk]
+    entity: identity
+    user_field: user
+    fields:
+      user: {type: string, description: Identity whose MFA behavior was summarized, dimension: true}
+      first_mfa_method: {type: string, description: Earliest observed MFA method, dimension: true}
+      latest_mfa_method: {type: string, description: Most recent observed MFA method, dimension: true}
+      distinct_mfa_methods: {type: integer, description: Number of distinct MFA methods observed, dimension: false}
+      failed_attempts: {type: integer, description: Failed authentication attempts, dimension: false}
+      total_attempts: {type: integer, description: Total authentication attempts, dimension: false}
+      last_login_time: {type: timestamp, description: Most recent login timestamp, dimension: true}
+      failure_rate: {type: float, description: Failed attempts divided by total attempts, dimension: false}
+    metrics:
+      finding_count: {description: Number of MFA-drift identity summaries, expression: "COUNT(*)", result_type: integer}
+      total_failed_attempts: {description: Total failed attempts represented by findings, expression: "SUM(t.`failed_attempts`)", result_type: integer}
+      average_failure_rate: {description: Average authentication failure rate, expression: "AVG(t.`failure_rate`)", result_type: float}
+      maximum_failure_rate: {description: Highest authentication failure rate, expression: "MAX(t.`failure_rate`)", result_type: float}
+    default_fields: [user, first_mfa_method, latest_mfa_method, distinct_mfa_methods, failed_attempts, total_attempts, failure_rate, last_login_time]
+    synonyms: [MFA method changed, authentication method drift]
+
+  suspicious_approver_behavior:
+    table: suspicious_approver_behavior
+    description: Access approvers with unusually one-sided or high-volume decision behavior.
+    grain: One approver identity summarized across its access-request decisions.
+    domains: [access_and_provisioning, identity_risk]
+    entity: approver
+    user_field: user
+    fields:
+      user: {type: string, description: Identity acting as the approver, dimension: true}
+      decision_count: {type: integer, description: Total approval decisions, dimension: false}
+      approved_count: {type: integer, description: Approved requests, dimension: false}
+      rejected_count: {type: integer, description: Rejected requests, dimension: false}
+      latest_decision_time: {type: timestamp, description: Most recent decision timestamp, dimension: true}
+      approval_rate: {type: float, description: Approved decisions divided by total decisions, dimension: false}
+    metrics:
+      approver_count: {description: Number of suspicious approvers, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      total_decisions: {description: Total decisions made by suspicious approvers, expression: "SUM(t.`decision_count`)", result_type: integer}
+      average_approval_rate: {description: Average approval rate, expression: "AVG(t.`approval_rate`)", result_type: float}
+      maximum_approval_rate: {description: Highest approval rate, expression: "MAX(t.`approval_rate`)", result_type: float}
+    default_fields: [user, decision_count, approved_count, rejected_count, approval_rate, latest_decision_time, finding_id]
+    synonyms: [risky approver, rubber stamping, unusual approval behavior]
+
+  ad_group_churn_rate:
+    table: ad_group_churn_rate
+    description: Identities and directory groups with repeated membership additions and removals.
+    grain: One identity and directory-group combination summarized across membership changes.
+    domains: [access_and_provisioning, identity_risk]
+    entity: ad_group_membership
+    user_field: user
+    fields:
+      user: {type: string, description: Identity whose membership changed, dimension: true}
+      group: {type: string, description: Directory group whose membership changed, dimension: true}
+      add_count: {type: integer, description: Membership additions, dimension: false}
+      remove_count: {type: integer, description: Membership removals, dimension: false}
+      change_count: {type: integer, description: Total membership changes, dimension: false}
+      latest_change_time: {type: timestamp, description: Most recent membership-change timestamp, dimension: true}
+    metrics:
+      finding_count: {description: Number of high-churn identity/group relationships, expression: "COUNT(*)", result_type: integer}
+      total_changes: {description: Total membership changes represented, expression: "SUM(t.`change_count`)", result_type: integer}
+      maximum_change_count: {description: Largest change count for one identity/group relationship, expression: "MAX(t.`change_count`)", result_type: integer}
+      affected_identity_count: {description: Distinct identities involved in high churn, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+    default_fields: [user, group, add_count, remove_count, change_count, latest_change_time, finding_id]
+    synonyms: [group churn, repeated add remove, unstable group membership]
+
+  orphan_event_detection:
+    table: orphan_event_detection
+    description: Source events whose identity has no matching HR lifecycle record.
+    grain: One source event for one identity absent from the HR identity population.
+    domains: [lifecycle_and_data_quality, identity_risk]
+    entity: source_event
+    user_field: user
+    fields:
+      user: {type: string, description: Identity referenced by the unmatched event, dimension: true}
+      source_event_id: {type: string, description: Identifier of the unmatched source event, dimension: true}
+      source: {type: string, description: Source system containing the event, dimension: true}
+      event_time: {type: timestamp, description: Timestamp of the unmatched event, dimension: true}
+    metrics:
+      finding_count: {description: Number of orphan source events, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities with orphan events, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+    default_fields: [user, source, source_event_id, event_time, finding_id]
+    synonyms: [event without HR user, unmatched source event]
+
+  orphan_user_detection:
+    table: orphan_user_detection
+    description: Identities observed in operational IAM sources but absent from HR lifecycle data.
+    grain: One orphan identity summarized across all observed source events.
+    domains: [lifecycle_and_data_quality, identity_risk]
+    entity: identity
+    user_field: user
+    fields:
+      user: {type: string, description: Identity absent from HR lifecycle data, dimension: true}
+      observed_sources: {type: array_string, description: Operational systems where the identity was observed, dimension: false, filterable: false}
+      event_count: {type: integer, description: Number of source events associated with the identity, dimension: false}
+    metrics:
+      orphan_identity_count: {description: Number of orphan identities, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      total_source_events: {description: Total events associated with orphan identities, expression: "SUM(t.`event_count`)", result_type: integer}
+      maximum_event_count: {description: Largest event count for one orphan identity, expression: "MAX(t.`event_count`)", result_type: integer}
+    default_fields: [user, observed_sources, event_count, finding_id, event_date]
+    synonyms: [orphan user, identity missing from HR, account without worker]
+
+  cleanest_users:
+    table: cleanest_users
+    description: The ten identities with the lowest calculated risk scores in the current pipeline output.
+    grain: One low-risk identity and pipeline run.
+    domains: [identity_risk]
+    entity: identity
+    user_field: user
+    fields:
+      user: {type: string, description: Low-risk identity, dimension: true}
+      risk_score: {type: integer, description: Calculated weighted IAM risk score, dimension: false}
+      risk_level: {type: string, description: Categorical risk level, dimension: true}
+      finding_count: {type: integer, description: Number of risk-contributing findings, dimension: false}
+      risk_factors: {type: array_string, description: Detection names contributing to risk, dimension: false, filterable: false}
+    metrics:
+      identity_count: {description: Number of identities in the low-risk output, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      average_risk_score: {description: Average score among the cleanest identities, expression: "AVG(t.`risk_score`)", result_type: float}
+      maximum_risk_score: {description: Highest score among the cleanest identities, expression: "MAX(t.`risk_score`)", result_type: integer}
+    default_fields: [user, risk_score, risk_level, finding_count, risk_factors, finding_id, event_date]
+    synonyms: [clean users, safest users, lowest risk identities]
+
+  shadow_access_events:
+    table: shadow_access_events
+    description: Privileged directory-group grants without a matching Saviynt request.
+    grain: One unmatched privileged directory grant for one identity.
+    domains: [access_and_provisioning, identity_risk]
+    entity: access_event
+    user_field: user
+    fields:
+      user: {type: string, description: Identity receiving the unmatched grant, dimension: true}
+      event_id: {type: string, description: Directory event identifier, dimension: true}
+      request_id: {type: string, description: Request identifier when present, dimension: true}
+      privileged_group: {type: string, description: Privileged directory group granted, dimension: true}
+      action: {type: string, description: Directory action, dimension: true}
+      granted_by: {type: string, description: Actor or service that granted the membership, dimension: true}
+      grant_time: {type: timestamp, description: Timestamp of the unmatched grant, dimension: true}
+    metrics:
+      finding_count: {description: Number of shadow-access grants, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities with shadow access, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      affected_group_count: {description: Distinct privileged groups involved, expression: "COUNT(DISTINCT t.`privileged_group`)", result_type: integer}
+    default_fields: [user, privileged_group, action, granted_by, grant_time, request_id, finding_id]
+    synonyms: [shadow access, unmanaged privilege, access outside Saviynt]
+
+  risk_scores:
+    table: risk_scores
+    description: Weighted identity-risk scores calculated from correlated IAM findings.
+    grain: One risk summary for one identity and pipeline run.
+    domains: [identity_risk]
+    entity: identity
+    user_field: user
+    fields:
+      user: {type: string, description: Identity whose risk was calculated, dimension: true}
+      risk_score: {type: integer, description: Weighted sum of risk-contributing findings, dimension: false}
+      risk_factors: {type: array_string, description: Detection names that contributed to the score, dimension: false, filterable: false}
+      finding_count: {type: integer, description: Number of risk-contributing findings, dimension: false}
+      risk_level: {type: string, description: Categorical level derived from the score, dimension: true}
+    metrics:
+      identity_count: {description: Distinct identities in the risk output, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      average_risk_score: {description: Average identity-risk score, expression: "AVG(t.`risk_score`)", result_type: float}
+      maximum_risk_score: {description: Maximum identity-risk score, expression: "MAX(t.`risk_score`)", result_type: integer}
+      total_finding_count: {description: Total risk-contributing finding count, expression: "SUM(t.`finding_count`)", result_type: integer}
+      high_risk_identity_count: {description: Identities currently categorized as high risk, expression: "COUNT(DISTINCT IF(t.`risk_level` = 'HIGH', t.`user`, NULL))", result_type: integer}
+    default_fields: [user, risk_score, risk_level, finding_count, risk_factors, finding_id, event_date, detected_at]
+    synonyms: [risk score, risky users, high risk identities, user risk]
+
+  identity_timelines:
+    table: identity_timelines
+    description: Normalized chronological Okta, Saviynt, AD, and application events for identities.
+    grain: One normalized source-system event for one identity.
+    domains: [identity_risk, authentication, access_and_provisioning, application_behavior]
+    entity: source_event
+    user_field: user
+    fields:
+      user: {type: string, description: Identity associated with the source event, dimension: true}
+      event_time: {type: timestamp, description: Timestamp of the normalized source event, dimension: true}
+      event_type: {type: string, description: Normalized source-event type, dimension: true}
+      source_event_id: {type: string, description: Original source-system event identifier, dimension: true}
+      details: {type: string, description: Compact source-specific event details, dimension: false}
+    metrics:
+      event_count: {description: Number of timeline events, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities represented in the timeline, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+    default_fields: [user, event_time, event_type, source_event_id, details, event_date]
+    synonyms: [identity timeline, user history, cross-source events]
+
+  suspicious_time_warp:
+    table: suspicious_time_warp
+    description: Directory or application actions whose timestamps precede their related approval.
+    grain: One source action that occurred before one related access-request approval.
+    domains: [lifecycle_and_data_quality, access_and_provisioning, identity_risk]
+    entity: access_event
+    user_field: user
+    fields:
+      user: {type: string, description: Identity associated with the approval and action, dimension: true}
+      request_id: {type: string, description: Related access-request identifier, dimension: true}
+      source_event_id: {type: string, description: Directory or application event identifier, dimension: true}
+      source: {type: string, description: System in which the early action occurred, dimension: true}
+      action_time: {type: timestamp, description: Timestamp of the source-system action, dimension: true}
+      approval_time: {type: timestamp, description: Timestamp of the related approval, dimension: true}
+      seconds_before_approval: {type: integer, description: Seconds by which the action preceded approval, dimension: false}
+    metrics:
+      finding_count: {description: Number of time-warp findings, expression: "COUNT(*)", result_type: integer}
+      affected_identity_count: {description: Distinct identities affected by pre-approval actions, expression: "COUNT(DISTINCT t.`user`)", result_type: integer}
+      maximum_seconds_before_approval: {description: Largest lead time before approval, expression: "MAX(t.`seconds_before_approval`)", result_type: integer}
+    default_fields: [user, source, request_id, source_event_id, action_time, approval_time, seconds_before_approval, finding_id]
+    synonyms: [action before approval, time warp, preapproval execution]

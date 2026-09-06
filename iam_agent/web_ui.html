@@ -119,8 +119,6 @@
       .message.agent { align-self: flex-start; }
       .message.error { align-self: flex-start; color: var(--danger); border-color: #f2b8b5; }
       .message .label { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; opacity: .72; }
-      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
-
       .composer { border-radius: 16px; padding: 12px; display: flex; gap: 10px; }
       .composer input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
       .composer input:focus { outline: 3px solid rgba(39, 88, 215, .15); border-color: var(--brand); }
@@ -139,8 +137,8 @@
     <div class="shell">
       <aside>
         <div class="mark">IAM</div>
-        <h1>Identity Risk Agent</h1>
-        <p>Investigate BigQuery identity signals and send deterministic remediations through human approval.</p>
+        <h1>IAM Analytics Agent</h1>
+        <p>Ask natural-language questions across 22 governed BigQuery IAM analytics outputs. This agent is read-only.</p>
         <div class="identity">
           <strong>Signed-in identity</strong>
           <span id="identity">Not signed in</span>
@@ -150,8 +148,8 @@
       <main>
         <header>
           <div>
-            <h2>Investigation workspace</h2>
-            <p>Google-authenticated browser interface</p>
+            <h2>Conversational analytics</h2>
+            <p>Google-authenticated, MCP-governed, and read-only</p>
           </div>
           <div id="signin"></div>
           <button id="signout" class="button secondary" type="button">Sign out</button>
@@ -160,12 +158,12 @@
         <section id="messages" aria-live="polite">
           <div id="empty" class="empty">
             <h3>Sign in to start</h3>
-            <p>Then try <strong>help</strong> or <strong>investigate user1</strong>.</p>
+            <p>Then ask <strong>Which users are riskiest?</strong> or <strong>Why is user12 risky?</strong></p>
           </div>
         </section>
 
         <form id="composer" class="composer">
-          <input id="prompt" type="text" maxlength="1000" autocomplete="off" placeholder="Ask the IAM agent…" disabled>
+          <input id="prompt" type="text" maxlength="2000" autocomplete="off" placeholder="Ask anything about the IAM analytics data…" disabled>
           <button id="send" class="button" type="submit" disabled>Send</button>
         </form>
       </main>
@@ -190,7 +188,7 @@
         ).join("")));
       }
 
-      function addMessage(kind, text, actions = []) {
+      function addMessage(kind, text) {
         empty?.remove();
         const message = document.createElement("article");
         message.className = `message ${kind}`;
@@ -204,57 +202,12 @@
         content.textContent = text;
         message.appendChild(content);
 
-        if (actions.length) {
-          const controls = document.createElement("div");
-          controls.className = "actions";
-          actions.forEach((action) => {
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = `button ${action.approve ? "" : "danger"}`;
-            button.textContent = action.approve ? "Approve" : "Reject";
-            button.addEventListener("click", () => decide(action.actionId, action.approve));
-            controls.appendChild(button);
-          });
-          message.appendChild(controls);
-        }
-
         messages.appendChild(message);
         messages.scrollTop = messages.scrollHeight;
       }
 
-      function plainText(htmlText) {
-        const documentFragment = new DOMParser().parseFromString(htmlText, "text/html");
-        return documentFragment.body.textContent || "";
-      }
-
       function parseResponse(payload) {
-        if (payload.text) return { text: payload.text, actions: [] };
-        const card = payload.cardsV2?.[0]?.card;
-        if (!card) return { text: JSON.stringify(payload, null, 2), actions: [] };
-
-        const lines = [];
-        const actions = [];
-        for (const section of card.sections || []) {
-          for (const widget of section.widgets || []) {
-            if (widget.decoratedText) {
-              const item = widget.decoratedText;
-              lines.push(`${item.topLabel || ""}: ${item.text || ""}`.trim());
-              if (item.bottomLabel) lines.push(item.bottomLabel);
-            }
-            if (widget.textParagraph?.text) lines.push(plainText(widget.textParagraph.text));
-            for (const button of widget.buttonList?.buttons || []) {
-              const action = button.onClick?.action;
-              const actionId = action?.parameters?.find((item) => item.key === "action_id")?.value;
-              if (actionId) {
-                actions.push({
-                  actionId,
-                  approve: action.function === "approve_action",
-                });
-              }
-            }
-          }
-        }
-        return { text: lines.filter(Boolean).join("\n"), actions };
+        return payload.text || JSON.stringify(payload, null, 2);
       }
 
       async function callApi(url, options) {
@@ -286,8 +239,7 @@
             method: "POST",
             body: JSON.stringify({ text }),
           });
-          const parsed = parseResponse(payload);
-          addMessage("agent", parsed.text, parsed.actions);
+          addMessage("agent", parseResponse(payload));
         } catch (error) {
           addMessage("error", error.message);
         } finally {
@@ -299,19 +251,6 @@
         }
       }
 
-      async function decide(actionId, approve) {
-        try {
-          const payload = await callApi(`/web/actions/${encodeURIComponent(actionId)}/decision`, {
-            method: "POST",
-            body: JSON.stringify({ approve }),
-          });
-          const parsed = parseResponse(payload);
-          addMessage("agent", parsed.text, parsed.actions);
-        } catch (error) {
-          addMessage("error", error.message);
-        }
-      }
-
       window.handleGoogleCredential = (response) => {
         credential = response.credential;
         const claims = tokenClaims(credential);
@@ -320,8 +259,8 @@
         signout.style.display = "inline-block";
         promptInput.disabled = false;
         sendButton.disabled = false;
-        empty.querySelector("h3").textContent = "Ready to investigate";
-        empty.querySelector("p").textContent = "Try help or investigate user1.";
+        empty.querySelector("h3").textContent = "Ready for IAM questions";
+        empty.querySelector("p").textContent = "Try: Which users are riskiest, and why?";
         promptInput.focus();
       };
 

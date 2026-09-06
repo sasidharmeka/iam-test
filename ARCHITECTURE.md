@@ -1,144 +1,248 @@
-# IAM Agent Platform Architecture
+# Technical architecture
 
-## Responsibility split
+## Design goal
 
-| Layer | Responsibility | May write? |
-|---|---|---:|
-| `IAM_NEW_1` | Ingest events, run Spark detections, build BigQuery analytics | BigQuery only |
-| Gmail web UI / Google Chat + FastAPI | Accept user requests and approval clicks | No IAM systems |
-| Authorization | Map actor role/scope and target hierarchy | No |
-| IAM orchestrator | Collect evidence and coordinate Gemini agents | Action proposal only |
-| Cloud SQL | Operational action state, decisions, audit, simulated state | Yes |
-| Approval gateway | Enforce human authorization and state transitions | Cloud SQL only |
-| Deterministic executor | Run exactly the approved operation | Simulated IAM only |
+The application should feel like a general conversational IAM analyst while preserving a hard
+boundary: an LLM may decide *what approved evidence would answer a question*, but deterministic
+application code decides *whether that request is valid and exactly which SQL may run*.
 
-BigQuery is the analytical plane. Cloud SQL is the operational control plane. Keeping them
-separate prevents chat retries or agent reasoning from mutating analytics.
+The system therefore separates reasoning, semantic metadata, query construction, execution,
+and narration. No single Gemini response is treated as executable code.
 
-## Investigation-to-recommendation sequence
+## End-to-end data flow
+
+```mermaid
+flowchart TD
+    S["Okta, Saviynt, AD, apps, HR"] --> I["Pub/Sub and GCS"]
+    I --> P["Spark transformations and detections"]
+    P --> B["22 BigQuery analytics outputs"]
+    B --> E["Risk signals, timelines, anomalies"]
+    W["Authenticated web or Chat user"] --> A["FastAPI and hierarchy authorization"]
+    A --> O["IAM orchestrator"]
+    O <--> L["Gemini structured reasoning"]
+    O <--> M["MCP discovery and query tools"]
+    M --> V["Catalog, validator, compiler, byte limits"]
+    V --> B
+```
+
+`IAM_NEW_1` owns ingestion, transformation, detection, and BigQuery output creation. This
+repository owns authenticated read-only exploration of those outputs.
+
+## Startup sequence
+
+When a Cloud Run instance starts, `iam_agent/api.py` constructs the dependency graph:
+
+1. Load settings, the principal allowlist, identity hierarchy, policy text, and semantic catalog.
+2. Create the BigQuery executor, deterministic compiler, and query validator.
+3. Place those components behind `IAMEvidenceService`.
+4. Register the service's three tools on an official `MCPServer`.
+5. Give the orchestrator an official MCP `Client`, a Gemini planner, an answerer, and bounded
+   conversation memory.
+6. During FastAPI lifespan startup, call MCP `list_tools` and `list_iam_domains`. Startup fails
+   if the expected tool contract is incomplete.
+
+The MCP transport is in-process. That is an intentional deployment choice, not a mock: tool
+registration, discovery, schemas, serialization, and calls still go through the official MCP
+SDK. There is one Cloud Run service and no separately exposed MCP endpoint.
+
+## Per-message sequence
 
 ```mermaid
 sequenceDiagram
-    participant U as Authenticated user
-    participant C as Web/Chat + FastAPI
-    participant O as IAM orchestrator
+    participant U as User
+    participant F as FastAPI
+    participant O as Orchestrator
+    participant G as Gemini
+    participant M as MCP service
     participant B as BigQuery
-    participant A as Gemini agents
-    participant Q as Cloud SQL
 
-    U->>C: Investigate user12
-    C->>C: Authenticate and authorize
-    C->>O: Actor, target, source event ID
-    O->>Q: Check event idempotency
-    O->>B: Parameterized identity evidence query
-    B-->>O: Risk, timeline, findings
-    par Independent evidence analysis
-        O->>A: Investigation
-        O->>A: Policy/RAG
-        O->>A: Impact analysis
+    U->>F: Natural-language question
+    F->>F: Verify Google token
+    F->>O: Verified principal + conversation key
+    O->>O: Require query permission
+    O->>M: list_iam_domains (cached)
+    M-->>O: Five domain summaries
+    O->>G: Question + history + domain summaries
+    G-->>O: QuestionDecomposition
+    alt Project data is required
+        O->>M: describe_iam_domains(selected domains)
+        M-->>O: Relevant concepts and semantic schema
+        O->>G: Create typed AnalysisPlan
+        G-->>O: Semantic steps, no SQL
+        O->>M: run_iam_query(principal, plan)
+        M->>M: Validate scope, catalog, and limits
+        M->>M: Compile parameterized SELECT
+        M->>B: Dry run
+        B-->>M: Estimated bytes
+        M->>B: Execute within byte ceiling
+        B-->>M: Rows
+        M-->>O: EvidenceBundle
+        O->>G: Question + plan + evidence
+        G-->>O: Grounded AnalystAnswer
+    else General IAM question
+        O->>G: General answer without project claims
+        G-->>O: AnalystAnswer
     end
-    O->>A: Remediation synthesis
-    A-->>O: Typed operation or no_action
-    O->>O: Validate target and evidence resource
-    O->>Q: Insert PENDING_APPROVAL
-    O-->>C: Review card
-    C-->>U: Approve / Reject buttons
+    O-->>F: Answer + sources + caveats
+    F-->>U: Conversational response
 ```
 
-The three analysis calls are independent once the evidence bundle exists, so they run via
-`asyncio.gather`. Remediation is dependent on all three and runs afterward. This is
-concurrency for latency; it is not a set of long-running agent threads or microservices.
+The orchestrator—not Gemini—owns every MCP call. Gemini receives domain metadata or evidence as
+input to a structured-output request. It has no Google Cloud credential and no direct database
+or MCP transport handle.
 
-## Approval-to-verification sequence
+## How a question becomes SQL
 
-```mermaid
-sequenceDiagram
-    participant H as Human approver
-    participant C as Web UI or Google Chat
-    participant G as Approval gateway
-    participant Q as Cloud SQL
-    participant T as Deterministic tool
+Consider: "Show the ten riskiest Finance users."
 
-    H->>C: Click Approve
-    C->>G: Actor + action_id
-    G->>Q: Load immutable plan
-    G->>G: Role, hierarchy, self-approval checks
-    G->>Q: PENDING_APPROVAL -> APPROVED -> EXECUTING
-    G->>T: Execute stored operation
-    T->>Q: Update simulated IAM state
-    T->>Q: Read state back and verify
-    G->>Q: EXECUTED or FAILED + audit
-    G-->>C: Updated status card
-    C-->>H: Final result
+Gemini receives business vocabulary from MCP and may produce a plan equivalent to:
+
+```json
+{
+  "objective": "Rank Finance identities by risk",
+  "steps": [
+    {
+      "step_id": "rank_finance_risk",
+      "purpose": "Return the ten highest observed risk scores",
+      "concept": "risk_scores",
+      "operation": "rank",
+      "fields": [],
+      "metrics": ["maximum_risk_score"],
+      "dimensions": ["user"],
+      "filters": [
+        {"field": "department", "operator": "equals", "value": "finance"}
+      ],
+      "time_range_days": null,
+      "order_by": [],
+      "limit": 10
+    }
+  ]
+}
 ```
 
-## Action state machine
+That JSON contains no dataset, table identifier, SQL expression, join, or IAM operation. The
+trusted catalog maps `risk_scores` to one fixed table and maps `maximum_risk_score` to
+`MAX(t.risk_score)`. The compiler derives `department` from `config/identities.yaml`, adds the
+authenticated user's allowed identities, creates BigQuery parameters, and emits the final
+query. User strings never become SQL identifiers or SQL fragments.
 
-```mermaid
-stateDiagram-v2
-    [*] --> PENDING_APPROVAL
-    PENDING_APPROVAL --> REJECTED: authorized rejection
-    PENDING_APPROVAL --> APPROVED: authorized approval
-    APPROVED --> EXECUTING
-    EXECUTING --> EXECUTED: verification passes
-    EXECUTING --> FAILED: execution or verification fails
-```
+## Semantic vocabulary
 
-Conditional SQL updates enforce these transitions. Replayed button clicks return the
-terminal record and cannot run the tool twice.
+| Term | Technical meaning | BigQuery relationship |
+| --- | --- | --- |
+| Domain | Compact business topic used during first-pass routing | Groups relevant outputs so Gemini does not need all 22 schemas on every request |
+| Concept | Governed analytical object | Maps one-to-one to an allowlisted output table, such as `risk_scores` |
+| Entity | Thing represented by the rows | Usually an identity, event, session, identity-application pair, or aggregate window |
+| Grain | Exact meaning of one row | Prevents invalid reasoning, such as treating one user-app row as one whole user |
+| Field | Physical column that may be selected or filtered | Must exist in the catalogued output schema |
+| Dimension | Categorical/time field used to group or compare | Becomes a safe `GROUP BY`; examples are `user`, `app`, and `event_date` |
+| Virtual dimension | Trusted attribute not stored in every output | `department`, `job_role`, and hierarchy scope are derived from the identity directory |
+| Metric | Named aggregation with a trusted expression | Maps to fixed SQL such as `COUNT(*)`, `MAX(risk_score)`, or `AVG(failure_rate)` |
+| Filter | Typed restriction on an approved field | Compiles to a BigQuery parameter, never string concatenation |
+| Operation | Shape of result | `records`, `aggregate`, `rank`, or `trend` |
 
-## Agent contracts
+An analogy is a governed restaurant: the user describes a meal, Gemini writes an order using
+only menu names, the validator checks dietary and portion rules, the compiler is the kitchen's
+fixed recipe, BigQuery is the pantry, and Gemini plates the returned food into an explanation.
+Gemini may combine menu items, but it cannot enter the pantry or rewrite a recipe.
 
-| Agent | Inputs | Output | Explicitly cannot do |
-|---|---|---|---|
-| Investigation | Risk profile, anomaly rows, timeline | Findings with table + finding ID | Execute changes |
-| Policy/RAG | Retrieved policy chunks and risk summary | Controls with exact chunk IDs | Invent policies |
-| Impact analysis | Evidence bundle | Blast radius, urgency, action/inaction risks | Select a tool |
-| Remediation | Three assessments and target identity | One typed plan or `no_action` | Approve or execute |
+## The 22-output contract
 
-Gemini structured output is validated with Pydantic. Prompts delimit evidence and instruct
-the model to treat retrieved values as data rather than instructions.
+`config/semantic_catalog.yaml` versions the application-facing contract for the Spark outputs:
 
-## Authorization hierarchy
+| # | BigQuery output | Primary purpose |
+| ---: | --- | --- |
+| 1 | `impossible_login_anomalies` | App activity implausibly close to login |
+| 2 | `mfa_bypass_events` | App access after a failed MFA event |
+| 3 | `mfa_bypass_events_all_apps` | Cross-application activity after MFA failure |
+| 4 | `impossible_travel_events` | Geographic travel requiring implausible speed |
+| 5 | `privilege_escalation_without_request` | Privilege grant lacking a matched request |
+| 6 | `ad_volume_spikes` | Organization-wide Active Directory action spikes |
+| 7 | `rejected_but_executed` | Rejected request whose access change still occurred |
+| 8 | `high_risk_sequence` | Suspicious ordered application sequence |
+| 9 | `excessive_data_transferred` | Data transfer above an identity's rolling norm |
+| 10 | `role_drift` | Identity/application role changes over time |
+| 11 | `stale_access` | Granted access with prolonged non-use |
+| 12 | `multi_app_single_session` | Many applications used in one session |
+| 13 | `mfa_drift` | MFA method and failure-pattern changes |
+| 14 | `suspicious_approver_behavior` | Unusual approval volume or approval rate |
+| 15 | `ad_group_churn_rate` | Repeated group additions and removals |
+| 16 | `orphan_event_detection` | Events that cannot be reconciled across sources |
+| 17 | `orphan_user_detection` | Identities observed without expected source coverage |
+| 18 | `cleanest_users` | Identities with the lowest synthesized risk |
+| 19 | `shadow_access_events` | Privileged access not supported by normal governance |
+| 20 | `risk_scores` | Identity-level synthesized risk and contributing factors |
+| 21 | `identity_timelines` | Chronological, cross-source identity events |
+| 22 | `suspicious_time_warp` | Action timestamp preceding approval timestamp |
 
-`config/authorization.yaml` or the deployed principal variables assign every user a role and
-a scope. An actor may
-act only when their scope is an ancestor of the target identity's path from
-`config/identities.yaml`.
+Every output also includes `detection_name`, `finding_id`, `event_date`, `pipeline_run_id`, and
+`detected_at`. The YAML catalog contains the exact remaining schema, data types, descriptions,
+dimensions, metrics, synonyms, row grain, and default fields for every output.
 
-Example:
+## Validator reference model
 
-| Actor scope | Target scope | Result |
-|---|---|---|
-| `/company/finance` | `/company/finance/manager` | In scope |
-| `/company/finance` | `/company/engineering/manager` | Denied |
-| `/` | Any normalized target path | In scope |
+The deterministic validator compares a Gemini plan with four trusted references:
 
-Paths are compared by segments, so `/company/fin` is not an ancestor of
-`/company/finance`.
+| Validation | Trusted reference | Rejected example |
+| --- | --- | --- |
+| Concept exists | `semantic_catalog.yaml` concept keys | `employee_salary` |
+| Fields/dimensions/metrics exist | Selected concept definition | Metric `salary` on `risk_scores` |
+| Operation is coherent | Pydantic model and operation rules | Record query containing aggregate metrics |
+| User is authorized | Environment principal grant plus `identities.yaml` hierarchy | Finance-scoped analyst requests `user5` in Engineering |
+| Global data is safe | Concept `user_field` plus actor scope | Department analyst requests unscoped `ad_volume_spikes` |
+| Query is bounded | `QUERY_MAX_*` settings | 10,000 rows, 500-day range, or too many steps |
+| Sort is meaningful | Selected output aliases | Sort by an unselected field |
+| Cost is bounded | BigQuery dry-run bytes | Estimated bytes exceed `QUERY_MAX_BYTES_BILLED` |
 
-## BigQuery contract with IAM_NEW_1
+Pydantic validation happens both when Gemini creates the plan and again at the MCP tool
+boundary. The semantic validator then applies the catalog and actor-specific checks.
 
-The evidence adapter reads the user-scoped outputs defined by
-`IAM_NEW_1/spark_job/detections.py`. Every query uses `@target_user` and `@row_limit`. Table
-identifiers come only from a source-code tuple; neither the user nor Gemini can select an
-arbitrary table.
+## SQL safety invariants
 
-Global aggregations such as `ad_volume_spikes` and `ad_group_churn_rate` are intentionally
-not pulled into a single-user investigation because they do not have a reliable `user`
-filter.
+- Only `iam_mcp/compiler.py` constructs SQL.
+- The compiler always starts from a catalog concept loaded from source control.
+- Physical identifiers are validated at catalog startup and never accepted from the user or LLM.
+- Values use `ScalarQueryParameter` or `ArrayQueryParameter`.
+- Every user-scoped concept receives `user IN UNNEST(@authorized_users)`.
+- A narrow hierarchy scope cannot query a concept lacking a user field.
+- One plan step queries exactly one table; arbitrary joins and subqueries are impossible.
+- Only four result shapes are implemented: records, aggregate, rank, and trend.
+- A BigQuery dry run precedes execution and the actual job repeats the bytes-billed ceiling.
+- The runtime service account has BigQuery viewer/job access and no IAM mutation role.
 
-## Trust boundaries
+## Authorization and conversation context
 
-- The HTTPS service is reachable so the browser can load its sign-in page. FastAPI verifies
-  a Google Identity Services ID token on every browser message or decision request.
-- The Google Chat endpoint separately verifies the token issued to
-  `chat@system.gserviceaccount.com` for its exact endpoint audience.
-- The verified browser email or Chat event user is authorized separately. Request
-  authentication does not imply user permission.
-- BigQuery credentials are read-only for data; Cloud SQL credentials own action state.
-- The LLM cannot submit SQL, decide approval, change an existing plan, or invoke IAM tools.
-- Group/entitlement operations are rejected unless their exact resource is present in the
-  collected evidence.
-- The requestor cannot approve their own action, even if they also hold an admin role.
-- Audit rows capture creation, decision, execution, and verification.
+The verified Google email is mapped to a read-only grant. `QUERY_DEFAULT_SCOPE` assigns the
+maximum hierarchy visible to deployment-provided principals. `config/identities.yaml` maps
+synthetic identities to paths such as `/company/finance/manager`.
+
+Scope comparison uses path segments. `/company/finance` contains
+`/company/finance/manager`, but `/company/fin` does not contain `/company/finance`.
+
+Conversation context is a small in-memory, per-user/per-space/per-thread list. It allows
+follow-ups such as "What about their MFA history?" It is bounded by session and turn limits,
+contains summaries rather than database state, disappears when a Cloud Run instance is
+replaced, and is never used as an authorization source.
+
+## Answer grounding
+
+For a project-data question, the final Gemini call receives the original question, typed plan,
+returned rows, queried table list, optional retrieved policy chunks, and bounded conversation
+history. The prompt forbids unsupported project claims. Application code removes any source
+name Gemini returns unless it is in `evidence.queried_tables`; if Gemini returns no valid source,
+the application supplies the actual queried table list.
+
+For a general IAM question, no BigQuery query runs. Gemini may explain concepts, but the prompt
+forbids claiming that a project user, score, event, application, group, or trend exists.
+
+## Deliberately removed control plane
+
+The previous demonstration mixed analytics with remediation recommendation, Cloud SQL action
+state, approvals, and simulated IAM modification. Those modules, routes, dependencies, settings,
+tests, and deployment resources have been removed. `/google-chat/decisions/{action_id}` no longer
+exists, and the web interface renders text only.
+
+If remediation is reintroduced later, it should be a separate control plane with its own
+authentication, approval state machine, credentials, audit store, connector allowlist, and
+deployment identity. It should consume signed analytical findings rather than weakening this
+read-only service.

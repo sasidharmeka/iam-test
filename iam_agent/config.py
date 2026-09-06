@@ -12,7 +12,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
-    """Configuration shared by the API, agents, and data adapters."""
+    """Configuration for the read-only API, Gemini, MCP, and BigQuery layers."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -27,32 +27,29 @@ class Settings(BaseSettings):
 
     bigquery_project: str = "rapid-stage-506406-t4"
     bigquery_dataset: str = "iam_data_dev"
-    bigquery_rows_per_table: int = Field(default=10, ge=1, le=50)
+    query_max_rows: int = Field(default=500, ge=1, le=5000)
+    query_max_bytes_billed: int = Field(default=500_000_000, ge=1_000_000)
+    query_max_lookback_days: int = Field(default=90, ge=1, le=3660)
+    query_max_steps: int = Field(default=6, ge=1, le=8)
 
-    database_url: str = "sqlite+pysqlite:///./iam_agent.db"
     authorization_config: Path = REPOSITORY_ROOT / "config" / "authorization.yaml"
     identity_directory_config: Path = REPOSITORY_ROOT / "config" / "identities.yaml"
+    semantic_catalog_config: Path = REPOSITORY_ROOT / "config" / "semantic_catalog.yaml"
     policy_directory: Path = REPOSITORY_ROOT / "policies"
+
+    conversation_max_sessions: int = Field(default=250, ge=1, le=5000)
+    conversation_max_turns: int = Field(default=6, ge=1, le=20)
 
     verify_google_chat_token: bool = False
     google_chat_audience: str | None = None
     google_chat_service_account: str = "chat@system.gserviceaccount.com"
 
-    # Optional browser UI. The Cloud Run service may be publicly reachable only
-    # when every state-changing web route verifies a Google Identity Services
-    # ID token against this OAuth client ID.
     enable_web_ui: bool = False
     web_google_client_id: str = ""
     web_analyst_principals: str = ""
-    web_approver_principals: str = ""
-    web_admin_principals: str = ""
 
-    # Comma-separated Google Workspace principals. When any of these are set,
-    # they replace the example grants in config/authorization.yaml at runtime.
     chat_analyst_principals: str = ""
-    chat_approver_principals: str = ""
-    chat_admin_principals: str = ""
-    chat_default_scope: str = "/company"
+    query_default_scope: str = "/company"
 
     @field_validator("bigquery_project", "bigquery_dataset")
     @classmethod

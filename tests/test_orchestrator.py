@@ -1,143 +1,171 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from iam_agent.agents import (
-    ImpactAnalysisAgent,
-    InvestigationAgent,
-    PolicyAgent,
-    RemediationAgent,
-)
-from iam_agent.authorization import AuthorizationService, IdentityDirectory, PrincipalGrant
+from iam_agent.answerer import AnswerAgent
+from iam_agent.authorization import AuthorizationService, PrincipalGrant
+from iam_agent.config import Settings
+from iam_agent.conversation import ConversationStore
 from iam_agent.models import (
-    ActionStatus,
+    AnalysisPlan,
+    AnalystAnswer,
+    AnswerMode,
     ChatActor,
     EvidenceBundle,
-    EvidenceRecord,
-    ImpactAssessment,
-    InvestigationFinding,
-    InvestigationReport,
-    Operation,
-    PolicyAssessment,
-    PolicyControl,
-    RemediationRecommendation,
-    TargetSystem,
+    IAMDomain,
+    QueryOperation,
+    QueryStep,
+    QueryStepResult,
+    QuestionDecomposition,
     UserRole,
 )
-from iam_agent.orchestrator import IAMOrchestrator, IntentRouter
+from iam_agent.orchestrator import IAMOrchestrator
+from iam_agent.planner import QuestionPlanner
 from iam_agent.policy_rag import PolicyStore
 
 
-class FakeEvidence:
-    async def collect(self, target_user: str) -> EvidenceBundle:
-        return EvidenceBundle(
-            target_user=target_user,
-            risk_profile={"risk_level": "HIGH", "risk_score": 12},
-            findings=[
-                EvidenceRecord(
-                    table="shadow_access_events",
-                    data={
-                        "finding_id": "finding-1",
-                        "user": target_user,
-                        "privileged_group": "Domain Admins",
-                    },
-                )
-            ],
-            queried_tables=["risk_scores", "shadow_access_events"],
-        )
-
-
 class FakeModel:
-    def __init__(self):
-        self.calls = 0
+    def __init__(self, *, data_question: bool):
+        self.data_question = data_question
+        self.response_models: list[type] = []
 
-    async def generate_structured(self, *, system_instruction: str, prompt: str, response_model):
-        self.calls += 1
-        if response_model is InvestigationReport:
-            return InvestigationReport(
-                summary="Unsupported privilege",
-                assessed_risk_level="HIGH",
-                findings=[
-                    InvestigationFinding(
-                        source_table="shadow_access_events",
-                        finding_id="finding-1",
-                        severity="HIGH",
-                        explanation="No request",
+    async def generate_structured(self, *, system_instruction, prompt, response_model):
+        self.response_models.append(response_model)
+        if response_model is QuestionDecomposition:
+            if self.data_question:
+                return QuestionDecomposition(
+                    answer_mode=AnswerMode.DATA,
+                    clarified_question="Rank identities by risk score",
+                    domains=[IAMDomain.IDENTITY_RISK],
+                    entities=[],
+                    requires_project_data=True,
+                )
+            return QuestionDecomposition(
+                answer_mode=AnswerMode.GENERAL,
+                clarified_question="Explain least privilege",
+                requires_project_data=False,
+                requires_policy_context=True,
+            )
+        if response_model is AnalysisPlan:
+            return AnalysisPlan(
+                objective="Rank identities by risk score",
+                steps=[
+                    QueryStep(
+                        step_id="rank_risk",
+                        purpose="Return highest-risk identities",
+                        concept="risk_scores",
+                        operation=QueryOperation.RANK,
+                        metrics=["maximum_risk_score"],
+                        dimensions=["user"],
+                        limit=10,
                     )
                 ],
-                confidence=0.9,
             )
-        if response_model is PolicyAssessment:
-            return PolicyAssessment(
-                summary="Least privilege applies",
-                applicable_controls=[
-                    PolicyControl(
-                        control_id="IAM-02",
-                        title="Least privilege",
-                        requirement="Review unsupported privilege",
-                        source_chunk_id="policy:1",
-                    )
-                ],
-            )
-        if response_model is ImpactAssessment:
-            return ImpactAssessment(
-                business_impact="Admin access removed",
-                affected_systems=["active_directory"],
-                blast_radius="one membership",
-                urgency="high",
-            )
-        if response_model is RemediationRecommendation:
-            return RemediationRecommendation(
-                operation=Operation.REMOVE_AD_GROUP,
-                target_system=TargetSystem.ACTIVE_DIRECTORY,
-                target_user="user1",
-                target_resource="Domain Admins",
-                rationale="Unsupported membership",
-                risk_level="HIGH",
+        if response_model is AnalystAnswer:
+            return AnalystAnswer(
+                answer="user12 has the highest observed risk score.",
+                key_findings=["user12: 91"],
+                sources=["risk_scores", "not_queried"],
             )
         raise AssertionError(response_model)
 
 
-@pytest.mark.asyncio
-async def test_investigation_creates_one_idempotent_review_action(repository, tmp_path) -> None:
+class FakeMCPClient:
+    def __init__(self):
+        self.described: list[list[IAMDomain]] = []
+        self.plans: list[AnalysisPlan] = []
+
+    async def domain_summaries(self) -> dict[str, str]:
+        return {"identity_risk": "Risk scores and cross-signal findings"}
+
+    async def describe_domains(self, domains: list[IAMDomain]) -> dict:
+        self.described.append(domains)
+        return {
+            "domains": {"identity_risk": "Risk"},
+            "concepts": [{"concept": "risk_scores", "metrics": ["maximum_risk_score"]}],
+        }
+
+    async def run_query(self, principal: str, plan: AnalysisPlan) -> EvidenceBundle:
+        assert principal == "analyst@example.com"
+        self.plans.append(plan)
+        return EvidenceBundle(
+            objective=plan.objective,
+            queried_tables=["risk_scores"],
+            results=[
+                QueryStepResult(
+                    step_id="rank_risk",
+                    purpose="Return highest-risk identities",
+                    concept="risk_scores",
+                    source_table="risk_scores",
+                    rows=[{"user": "user12", "maximum_risk_score": 91}],
+                    row_count=1,
+                )
+            ],
+        )
+
+
+def build_orchestrator(tmp_path: Path, model: FakeModel, mcp: FakeMCPClient) -> IAMOrchestrator:
     (tmp_path / "policy.md").write_text(
-        "# Policy\n\n## Least privilege\nReview unsupported privilege.", encoding="utf-8"
+        "# IAM Policy\n\n## Least privilege\nGrant only required access.",
+        encoding="utf-8",
     )
-    model = FakeModel()
-    orchestrator = IAMOrchestrator(
-        evidence=FakeEvidence(),
+    settings = Settings(_env_file=None)
+    return IAMOrchestrator(
+        settings=settings,
         authorization=AuthorizationService(
             [
                 PrincipalGrant(
                     principal="analyst@example.com",
                     role=UserRole.ANALYST,
-                    scope="/company/finance",
+                    scope="/company",
                 )
             ]
         ),
-        identities=IdentityDirectory({"user1": "/company/finance/manager"}),
         policy_store=PolicyStore(tmp_path),
-        repository=repository,
-        intent_router=IntentRouter(model),
-        investigation_agent=InvestigationAgent(model),
-        policy_agent=PolicyAgent(model),
-        impact_agent=ImpactAnalysisAgent(model),
-        remediation_agent=RemediationAgent(model),
+        mcp_client=mcp,
+        planner=QuestionPlanner(model),
+        answerer=AnswerAgent(model),
+        conversations=ConversationStore(max_sessions=5, max_turns=3),
     )
 
-    request = dict(
+
+@pytest.mark.asyncio
+async def test_data_question_uses_mcp_plan_evidence_and_grounded_answer(tmp_path) -> None:
+    model = FakeModel(data_question=True)
+    mcp = FakeMCPClient()
+    orchestrator = build_orchestrator(tmp_path, model, mcp)
+
+    result = await orchestrator.answer(
         actor=ChatActor(principal="analyst@example.com"),
-        target_user="user1",
-        source_event_id="spaces/demo/messages/99",
-        chat_space="spaces/demo",
-        chat_thread="spaces/demo/threads/1",
-        original_request="Investigate user1",
+        question="Who is riskiest?",
+        conversation_key="demo",
     )
-    first = await orchestrator.investigate(**request)
-    second = await orchestrator.investigate(**request)
 
-    assert first.action is not None
-    assert first.action.status == ActionStatus.PENDING_APPROVAL
-    assert second.action is not None
-    assert second.action.action_id == first.action.action_id
-    assert model.calls == 4
+    assert result.plan is not None
+    assert result.evidence is not None
+    assert result.answer.sources == ["risk_scores"]
+    assert mcp.described == [[IAMDomain.IDENTITY_RISK]]
+    assert len(mcp.plans) == 1
+    assert model.response_models == [QuestionDecomposition, AnalysisPlan, AnalystAnswer]
+
+
+@pytest.mark.asyncio
+async def test_general_question_does_not_query_project_data(tmp_path) -> None:
+    model = FakeModel(data_question=False)
+    mcp = FakeMCPClient()
+    orchestrator = build_orchestrator(tmp_path, model, mcp)
+
+    result = await orchestrator.answer(
+        actor=ChatActor(principal="analyst@example.com"),
+        question="What is least privilege?",
+        conversation_key="demo",
+    )
+
+    assert result.plan is None
+    assert result.evidence is None
+    assert result.answer.sources == []
+    assert mcp.described == []
+    assert mcp.plans == []
+    assert model.response_models == [QuestionDecomposition, AnalystAnswer]

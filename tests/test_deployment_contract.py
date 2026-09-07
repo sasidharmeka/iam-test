@@ -37,7 +37,6 @@ def test_deployment_injects_read_only_query_limits_without_database() -> None:
         "BIGQUERY_DATASET",
         "QUERY_MAX_ROWS",
         "QUERY_MAX_BYTES_BILLED",
-        "QUERY_MAX_LOOKBACK_DAYS",
         "QUERY_MAX_STEPS",
         "GEMINI_MODEL",
         "CHAT_ANALYST_PRINCIPALS",
@@ -46,6 +45,7 @@ def test_deployment_injects_read_only_query_limits_without_database() -> None:
     )
     for fragment in required_fragments:
         assert fragment in workflow
+    assert "QUERY_MAX_LOOKBACK_DAYS" not in workflow
 
     forbidden_fragments = (
         "CLOUD_SQL_INSTANCE",

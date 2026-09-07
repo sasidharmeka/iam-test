@@ -174,7 +174,8 @@ class EmailService:
                 )
             item = EmailDraft(
                 uuid4().hex, owner.casefold(), conversation_key, content.subject, content.body,
-                recipient, available, list(dict.fromkeys(selected_ids)), time.monotonic() + self.ttl,
+                recipient, available, list(dict.fromkeys(selected_ids)),
+                time.monotonic() + self.ttl,
             )
             self._drafts[item.draft_id] = item
             return self._view(item)

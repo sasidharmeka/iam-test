@@ -17,3 +17,15 @@ jobs:
       - run: ruff check iam_agent iam_mcp tests main.py
       - run: python -m pytest -q
         if: ${{ !cancelled() }}
+
+  browser:
+    name: Browser interaction tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install "playwright>=1.55,<2"
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m unittest discover -s ui_tests -v

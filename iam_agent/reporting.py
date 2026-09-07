@@ -373,7 +373,8 @@ class ReportExporter:
                 fields = self._fieldnames(query_result.rows)
                 story.append(Paragraph(
                     "All returned rows are included. Long cells are abbreviated; use Excel or CSV "
-                    "for complete cell values. Row numbers align column groups.", styles["BodyText"],
+                    "for complete cell values. Row numbers align column groups.",
+                    styles["BodyText"],
                 ))
                 for start in range(0, len(fields), 5):
                     group = fields[start:start + 5]

@@ -3,8 +3,10 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from iam_agent.api import Container, create_app
+from iam_agent.authorization import AuthorizationService, PrincipalGrant
 from iam_agent.config import Settings
-from iam_agent.models import ReportFormat
+from iam_agent.email_service import EmailService
+from iam_agent.models import EmailContent, ReportFormat, UserRole
 from iam_agent.reporting import ReportStore
 
 
@@ -111,3 +113,47 @@ def test_report_download_requires_same_authenticated_owner() -> None:
     assert response.content.startswith(b"user,risk")
     assert "iam-report.csv" in response.headers["content-disposition"]
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_email_api_requires_preview_and_disallows_payload_changes():
+    import asyncio
+
+    from test_email_service import Sender
+
+    store, sender = ReportStore(), Sender()
+    emails = EmailService(store, sender)
+    container = Container(
+        settings=Settings(_env_file=None), gemini=FakeGemini(), verifier=FakeChatVerifier(),
+        web_verifier=FakeWebVerifier(), mcp_client=FakeMCP(), chat=FakeChat(), report_store=store,
+        email_service=emails, authorization=AuthorizationService([
+            PrincipalGrant(
+                principal="analyst@example.com", role=UserRole.ANALYST, scope="/company",
+            ),
+        ]),
+    )
+    draft = asyncio.run(emails.create(
+        owner="analyst@example.com", conversation_key="one",
+        content=EmailContent(subject="Report", body="Please review."), recipient="",
+        available=[], selected_ids=[],
+    ))
+    headers = {"Authorization": "Bearer demo"}
+    with TestClient(create_app(container)) as client:
+        path = f"/web/email/{draft['draft_id']}"
+        assert client.post(path + "/send", headers=headers, json={
+            "review_token": "invented", "confirmed": True, "access_token": "test-token",
+        }).status_code == 409
+        preview = client.post(path + "/preview", headers=headers, json={
+            "recipient": "recipient@example.com", "subject": "Reviewed", "body": "Reviewed body",
+            "attachment_ids": [],
+        })
+        assert preview.status_code == 200
+        payload = {
+            "review_token": preview.json()["review_token"],
+            "confirmed": True, "access_token": "test-token",
+        }
+        assert client.post(path + "/send", headers=headers, json={
+            **payload, "recipient": "unreviewed@example.com",
+        }).status_code == 422
+        assert not sender.calls
+        assert client.post(path + "/send", headers=headers, json=payload).status_code == 200
+        assert sender.calls[0]["recipient"] == "recipient@example.com"

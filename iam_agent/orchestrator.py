@@ -180,7 +180,8 @@ class IAMOrchestrator:
             if allow_actions and self.actions:
                 if report_formats:
                     _, failures = await self.actions.render(
-                        actor.principal, conversation_key, result, report_formats, original_question,
+                        actor.principal, conversation_key, result, report_formats,
+                        original_question,
                     )
                     if failures:
                         result.answer.caveats.append("Unavailable formats: " + ", ".join(failures))

@@ -7,7 +7,7 @@ import re
 from iam_agent.actions import ActionResolver, ReportAuthor
 from iam_agent.conversation import ConversationStore
 from iam_agent.email_service import EmailError, EmailService
-from iam_agent.errors import ModelOutputError
+from iam_agent.errors import DependencyError, ModelOutputError
 from iam_agent.models import (
     AnalystAnswer,
     AnswerMode,
@@ -45,12 +45,18 @@ class ConversationActions:
         )
 
     async def render(self, owner, key, source, formats, instruction):
-        if not source.report_document or re.search(
-            r"\b(full|detailed|executive|technical|management|professional)\b", instruction, re.I,
-        ):
+        expanded = bool(re.search(
+            r"\b(full|detailed|executive|technical|management|professional|report)\b",
+            instruction, re.I,
+        ))
+        rich_format = any(
+            value in {ReportFormat.PDF, ReportFormat.WORD, ReportFormat.POWERPOINT}
+            for value in formats
+        )
+        if expanded or (rich_format and not source.report_document):
             try:
                 source.report_document = await self.author.write(source, instruction)
-            except ModelOutputError:
+            except (ModelOutputError, DependencyError):
                 source.report_document = ReportDocument(
                     title="IAM Analytics Report", executive_summary=source.answer.answer,
                     sections=[ReportSection(heading="Report scope", body=(

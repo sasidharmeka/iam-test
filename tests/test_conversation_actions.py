@@ -5,6 +5,7 @@ import json
 
 import pytest
 from openpyxl import load_workbook
+from test_reporting import sample_result
 
 from iam_agent.actions import ActionResolver, ReportAuthor
 from iam_agent.conversation import ConversationStore
@@ -19,8 +20,6 @@ from iam_agent.models import (
 )
 from iam_agent.reporting import ReportService, ReportStore
 from iam_agent.result_store import ResultStore
-from test_reporting import sample_result
-
 OWNER, KEY = "analyst@example.com", "one"
 
 
@@ -169,8 +168,9 @@ async def test_unknown_attachment_id_is_rejected():
 
 @pytest.mark.asyncio
 async def test_full_orchestrator_analytics_then_export_then_email_queries_once(tmp_path):
-    from iam_agent.models import ChatActor
     from test_orchestrator import FakeMCPClient, FakeModel, build_orchestrator
+
+    from iam_agent.models import ChatActor
 
     actions, model = build_actions()
     mcp = FakeMCPClient()
@@ -191,3 +191,35 @@ async def test_full_orchestrator_analytics_then_export_then_email_queries_once(t
     assert len(mcp.plans) == 1
     assert initial.result_id == exported.result_id == draft.result_id
     assert draft.email_draft["attachment_ids"] == [exported.reports[0].report_id]
+
+
+@pytest.mark.asyncio
+async def test_rewritten_question_cannot_replace_original_validation_request(tmp_path):
+    from test_orchestrator import FakeMCPClient, FakeModel, build_orchestrator
+
+    from iam_agent.models import ChatActor
+
+    class CapturingMCP(FakeMCPClient):
+        async def search_catalog(self, principal, question, history):
+            self.retrieval_question = question
+            return await super().search_catalog(principal, question, history)
+
+        async def run_query(self, principal, plan, **kwargs):
+            self.validation_question = kwargs["question"]
+            return await super().run_query(principal, plan, **kwargs)
+
+    actions, model = build_actions()
+    await actions.results.save(OWNER, KEY, sample_result())
+    model.decision = ConversationAction(
+        action="analyze", resolved_question="Rank the riskiest users in the last 30 days",
+    )
+    mcp = CapturingMCP()
+    orchestrator = build_orchestrator(tmp_path, FakeModel(data_question=True), mcp)
+    orchestrator.actions = actions
+    original = "Which users are riskiest?"
+    await orchestrator.answer(
+        actor=ChatActor(principal=OWNER), question=original,
+        conversation_key=KEY, allow_actions=True,
+    )
+    assert mcp.retrieval_question == original
+    assert mcp.validation_question == original

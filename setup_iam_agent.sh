@@ -57,6 +57,7 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   cloudresourcemanager.googleapis.com \
   compute.googleapis.com \
+  gmail.googleapis.com \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
   run.googleapis.com \

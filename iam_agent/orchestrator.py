@@ -76,8 +76,10 @@ class IAMOrchestrator:
                 if response is not None:
                     return response
             stage = "catalog_retrieval"
-            # The raw question reaches deterministic catalog retrieval BEFORE any Gemini call.
-            retrieval = await self.mcp_client.search_catalog(actor.principal, question, history)
+            # Evidence validation uses the original message, never an LLM's rewritten instruction.
+            retrieval = await self.mcp_client.search_catalog(
+                actor.principal, original_question, history,
+            )
             domain_summaries = await self.mcp_client.domain_summaries()
             stage = "question_understanding"
             decomposition = await self.planner.decompose(
@@ -127,7 +129,7 @@ class IAMOrchestrator:
                         evidence = await self.mcp_client.run_query(
                             actor.principal,
                             plan,
-                            question=question,
+                            question=original_question,
                             history=history,
                         )
                         break

@@ -4,14 +4,97 @@ This guide covers the complete path from a fresh Google Cloud Shell to the authe
 interface. The GitHub Actions workflow builds and deploys the application after the one-time
 Google Cloud setup.
 
-## Updating an already working deployment to 3.3
+## Updating an already working deployment to 3.4
+
+Keep your existing GitHub Environment variables, including `WEB_GOOGLE_CLIENT_ID`.
+**No new variable, Gmail password, OAuth client secret, or database is required.**
+The new report actions and suggestion buttons work after redeploying. Gmail sending also
+needs these one-time Google settings:
+
+1. Open Cloud Shell in project `rapid-stage-506406-t4` and run:
+
+   ~~~bash
+   gcloud services enable gmail.googleapis.com \
+     --project=rapid-stage-506406-t4 --quiet
+   ~~~
+
+2. In the same project, open **Google Auth Platform → Data Access → Add or remove scopes**.
+   Add `https://www.googleapis.com/auth/gmail.send`; retain the existing basic identity scopes.
+   The app requests `openid email` with the sending scope so the server can check the sender.
+3. For personal Gmail testing, use **Audience → External → Testing** and add the Google account
+   used to sign in to the app under **Test users**. Keep that account in
+   `WEB_ANALYST_PRINCIPALS`. The email recipient does not need an app account.
+4. Keep the existing Cloud Run base URL under the OAuth web client's **Authorized JavaScript
+   origins**. This popup token flow does not introduce a redirect URI.
+5. Run **Actions → Deploy read-only IAM agent → Run workflow**, branch **main**, environment
+   **dev**. Reload your existing Cloud Run web page. Its `/healthz` should show version
+   `3.4.0`.
+
+The setup script now enables Gmail API for fresh installations too. Do not rerun all cloud
+setup just to add this feature; the command above is sufficient for API enablement.
+Google requires each sender to grant Gmail permission; the app cannot grant that consent
+through a setup script. The first **Send email** click opens Google's consent popup when needed.
+Choose the same Google account you used to sign in to the app.
+
+[Gmail scope documentation](https://developers.google.com/workspace/gmail/api/auth/scopes)
+classifies `gmail.send` as sensitive. Use test users while testing; a public rollout may require
+Google OAuth verification. The app requests sending access, without inbox-reading access.
+The [Google token model](https://developers.google.com/identity/oauth2/web/guides/use-token-model)
+uses a short-lived access token and does not require storing a refresh token.
+
+### Test the complete flow
+
+Use the browser interface at the Cloud Run base URL:
+
+~~~text
+Which users are riskiest?
+Give me this data so I can download it.
+Prepare a detailed professional report from this analysis as Word and PDF.
+Create a PowerPoint presentation from this analysis.
+Draft an email and attach the previous Excel you produced.
+~~~
+
+Suggested follow-up questions appear as buttons. Clicking one immediately sends its text and
+anchors it to the result beneath which it appeared. For the email draft, enter the recipient,
+edit the subject/body if needed, and choose the actual files in the attachment list. Select
+**Preview email**, review the exact message and filenames, then click **Send email**.
+Confirm the message in Gmail's Sent folder. A chat message such as "yes" never sends mail.
+
+New report/email controls are in the browser UI. The optional Google Chat app continues to
+answer IAM questions; its plain-text interface does not include these browser controls.
+
+### Retention and limits
+
+The deployment remains one Cloud Run instance and needs no Cloud SQL:
+saved analysis snapshots last up to 30 minutes; downloadable files and email drafts last up to
+15 minutes, subject to bounded capacity. The router sees the latest eight saved results.
+All these stores are in memory, so a restart, new revision, or scale-to-zero can clear them
+earlier. An expired file is reported as unavailable; it is not silently regenerated as a
+different attachment.
+
+Files are owner-bound. An email preview freezes the selected attachment bytes even if the
+download expires afterward. Files are capped at 16 MB, drafts at eight attachments and 12 MB
+of attachment content, and the complete MIME email at 20 MB. Gmail's own quotas still apply.
+The app never retries a send automatically. If the outcome is uncertain after a timeout,
+check Gmail Sent; that draft is locked against another send.
+
+Exports use the already returned rows and their original scope and limits. Asking for a
+download does not retrieve additional rows. For a larger or different report, ask for a new
+analysis with the desired criteria first. PDF abbreviates long table cells; Excel/CSV retain
+the returned values. PowerPoint summarizes the analysis and charts supported risk-score rows.
+
+For a multi-instance production deployment or durable reports across restarts, replace the
+in-memory stores with an owner-scoped persistent result/file store and a durable send ledger
+before increasing Cloud Run's instance limit.
+
+## Previous 3.3 query changes (still included)
 
 No new environment variables, secrets, IAM roles, or database are required for catalog-first
 routing, evidence coverage checks, or report exports. Keep the existing `dev` values. Run
 **Actions > Deploy read-only IAM agent > Run workflow**, select branch `main` and environment
 `dev`, and wait for success. Reload the existing Cloud Run web page.
 
-Open the service's `/healthz` URL. It should show `"version":"3.3.0"`, the deployed revision, and
+Open the service's `/healthz` URL. It should show `"version":"3.4.0"`, the deployed revision, and
 four MCP tools including `search_iam_catalog`. This confirms which code is serving requests;
 health alone does not verify live Gemini or BigQuery access. Test these exact requests:
 

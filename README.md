@@ -1,4 +1,4 @@
-# Read-only conversational IAM analytics agent
+# Conversational IAM analytics, reports, and reviewed email
 
 This repository turns the 22 BigQuery outputs produced by
 [`sasidharmeka/IAM_NEW_1`](https://github.com/sasidharmeka/IAM_NEW_1) into a
@@ -12,17 +12,21 @@ conversational IAM analyst. A user can ask broad questions such as:
 - "What is shadow access?"
 - "Export the ten riskiest users as Excel and PDF."
 
-Before the first Gemini call, the MCP service searches all 22 catalog entries using the question
+After conversation-action resolution, new analyses search all 22 MCP catalog entries using the question
 and relevant conversation history. It retrieves candidate schemas across multiple domains and
 derives evidence requirements independently of Gemini. Gemini creates a typed semantic plan.
 The MCP evidence service checks both question coverage and SQL safety, applies the user's
 hierarchy scope, compiles parameterized `SELECT` statements, checks their estimated BigQuery
 cost, and returns evidence. Gemini then explains that evidence in ordinary conversation.
-For browser requests that explicitly name CSV, Excel, PDF, or Word, deterministic exporters
-turn the same bounded answer and evidence into authenticated download files.
+The browser retains completed analyses so "download this" exports that exact result without
+new table selection. CSV, Excel, PDF, Word, and PowerPoint are supported. Suggested next
+questions are buttons that send the question when clicked. Gemini can draft a report or email;
+the user edits the recipient, message, and actual attachments, previews them, and explicitly
+clicks Send before Gmail is called. See [the 3.4 upgrade steps](DEPLOYMENT.md#updating-an-already-working-deployment-to-34).
 
-This version is intentionally read-only. It contains no remediation agent, approval gateway,
-action queue, deterministic IAM mutation tool, Cloud SQL dependency, or database secret.
+IAM analysis remains read-only: no remediation agent, IAM mutation tool, Cloud SQL dependency,
+or database secret is used. Gmail sending is a separate, explicitly confirmed action from the
+signed-in user's mailbox. The model cannot call the send endpoint.
 
 ## Interfaces
 
@@ -44,7 +48,10 @@ flowchart TD
     O <--> M["In-process MCP evidence server"]
     M --> C["Catalog + validator + SQL compiler"]
     C --> B
-    O --> R["CSV, Excel, PDF, Word exporters"]
+    O --> R["Saved results and report exporters"]
+    R --> E["Editable email draft"]
+    E --> V["User preview and Send"]
+    V --> S["Gmail sender"]
 ```
 
 The MCP client and server use the official MCP Python SDK. They run in the same Cloud Run
@@ -56,6 +63,8 @@ Gemini's semantic plan format.
 
 | Component | Responsibility |
 | --- | --- |
+| Conversation action resolver | Uses message history and saved result/file manifests to distinguish analysis, export, explanation, and email drafts before domain routing |
+| Saved result store | Keeps exact evidence and report IDs scoped to the signed-in user and conversation |
 | Catalog retriever | Searches all concepts before Gemini; combines topic aliases, descriptions, fields, and typo-tolerant matches; retains multiple candidates |
 | Gemini question planner | Resolves follow-ups and classifies general/data/mixed questions using already-retrieved schemas; domain labels do not gate data access |
 | MCP catalog tools | Expose approved domain, concept, field, dimension, metric, and grain descriptions |
@@ -68,7 +77,10 @@ Gemini's semantic plan format.
 | SQL compiler | Maps trusted concepts and metrics to fixed tables and SQL expressions; the only code that creates SQL |
 | BigQuery executor | Dry-runs each query, enforces bytes billed, executes read-only SQL, and returns rows |
 | Gemini answerer | Explains only the returned evidence and cites only queried outputs |
-| Report exporters | Deterministically render returned evidence; they cannot query BigQuery or execute formulas |
+| Report author | Drafts executive summary, findings, interpretation, priorities, and limits from saved evidence |
+| Report exporters | Render CSV/XLSX/PDF/DOCX/PPTX from that evidence; no new BigQuery query or executable formulas |
+| Email preview service | Validates recipient/ownership, freezes reviewed text and attachment bytes, and issues a review token |
+| Gmail sender | Checks the sending account, accepts only a confirmed frozen draft, and prevents automatic retries |
 
 Gemini can choose among allowed analytical building blocks, but cannot invent a table, metric
 expression, SQL fragment, or write operation.
@@ -87,7 +99,12 @@ iam_agent/
   orchestrator.py        Conversation workflow
   mcp_client.py           Official in-process MCP client
   conversation.py        Bounded in-memory follow-up context
-  reporting.py           Authenticated CSV/XLSX/PDF/DOCX generation and short-lived storage
+  actions.py             Structured action and reference understanding before domain selection
+  conversation_actions.py Export, explanation, and email-draft workflows over saved results
+  result_store.py        Owner/conversation-scoped analysis snapshots
+  reporting.py           CSV/XLSX/PDF/DOCX generation and short-lived file storage
+  slide_report.py        Native PowerPoint reports and evidence-based risk charts
+  email_service.py       Frozen previews, Gmail account verification, and confirmed sends
 
 iam_mcp/
   server.py              Four read-only MCP tools
@@ -211,3 +228,55 @@ long historical trend is possible only when the relevant table actually retains 
 Exporting a response changes its format, not the amount or scope of evidence available.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical sequence and safety invariants.
+
+## Conversation actions in 3.4
+
+The browser sends a per-tab conversation ID with each message. Clicking a suggested question
+also sends the originating result ID. After authentication and query authorization, the action
+resolver receives the current message, bounded conversation history, and saved result manifests
+containing the original question, plan, answer, and actual report IDs.
+
+A clear "download this" request takes the existing result directly to an exporter. For more
+complex follow-ups, Gemini returns a typed action and a standalone resolved question. The app
+checks referenced result/file IDs against the same user's conversation. New evidence requests
+continue through catalog retrieval, deterministic coverage/authorization validation, query
+compilation, BigQuery execution, and answer generation.
+
+Report generation preserves the canonical analysis: "your file is ready" does not replace the
+saved evidence or answer. Ordinary CSV/Excel downloads do not need another Gemini call.
+Detailed reports and richer document formats can invoke the report author over those saved
+facts. Generated files use authenticated owner-bound download endpoints.
+
+An email action creates only an application draft. Selecting Preview posts the edited recipient,
+subject, body, and attachment IDs to `/web/email/{draft_id}/preview`. The service validates them
+and freezes the exact bytes under a review token. Only the separate Send button obtains a
+short-lived Gmail access token and calls `/web/email/{draft_id}/send` with that review token
+and explicit confirmation. The endpoint cannot accept a replacement recipient/body/file list.
+It verifies that the Gmail sender matches the app login, then constructs and sends the MIME
+message. A duplicate request returns the existing receipt or a conflict; an uncertain send is
+locked and never automatically retried.
+
+The model is useful for interpreting language; the deterministic code governs identity, data
+scope, valid references, query structure, export formats, and the transition from preview to
+send. MCP coverage and time-policy validation continue to receive the original user message,
+so a model rewrite cannot make a model-invented time period count as an explicit user request. The application does not infer authorization from chat history or model output.
+
+## Validation
+
+The CI workflow runs Ruff, Python regression tests, and a separate Chromium browser job.
+The browser job uses fictitious Google identity, analysis, and email responses, blocks outbound
+Google requests, and checks automatic suggestion submission plus the full draft/preview/Send
+interaction. Python tests exercise real MCP/SDK contracts with simulated model and BigQuery
+responses, exact export values, ownership/expiry, MIME attachments, review-token binding,
+account mismatch, and duplicate/uncertain send behavior. No test sends real email.
+
+To run the browser checks separately:
+
+~~~bash
+python -m pip install "playwright>=1.55,<2"
+python -m playwright install chromium
+python -m unittest discover -s ui_tests -v
+~~~
+
+Live Gemini, BigQuery, Google consent, and Gmail sending still require the deployment's actual
+Google configuration. Follow the manual verification sequence in [DEPLOYMENT.md](DEPLOYMENT.md).

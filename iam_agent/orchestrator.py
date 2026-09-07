@@ -10,7 +10,13 @@ from iam_agent.config import Settings
 from iam_agent.conversation import ConversationStore
 from iam_agent.errors import DependencyError, ModelOutputError, WorkflowError
 from iam_agent.mcp_client import IAMEvidenceMCPClient, MCPToolError
-from iam_agent.models import ChatActor, ChatWorkflowResult, ConversationTurn, IAMDomain, ReportFormat
+from iam_agent.models import (
+    ChatActor,
+    ChatWorkflowResult,
+    ConversationTurn,
+    IAMDomain,
+    ReportFormat,
+)
 from iam_agent.planner import QuestionPlanner
 from iam_agent.policy_rag import PolicyStore
 from iam_agent.reporting import ReportService
@@ -22,9 +28,15 @@ class IAMOrchestrator:
     """Domain labels guide explanation; they never gate which evidence can be planned."""
 
     def __init__(
-        self, *, settings: Settings, authorization: AuthorizationService,
-        policy_store: PolicyStore, mcp_client: IAMEvidenceMCPClient,
-        planner: QuestionPlanner, answerer: AnswerAgent, conversations: ConversationStore,
+        self,
+        *,
+        settings: Settings,
+        authorization: AuthorizationService,
+        policy_store: PolicyStore,
+        mcp_client: IAMEvidenceMCPClient,
+        planner: QuestionPlanner,
+        answerer: AnswerAgent,
+        conversations: ConversationStore,
         report_service: ReportService | None = None,
     ):
         self.settings = settings
@@ -37,7 +49,11 @@ class IAMOrchestrator:
         self.report_service = report_service
 
     async def answer(
-        self, *, actor: ChatActor, question: str, conversation_key: str,
+        self,
+        *,
+        actor: ChatActor,
+        question: str,
+        conversation_key: str,
         report_formats: list[ReportFormat] | None = None,
     ) -> ChatWorkflowResult:
         stage = "authorization"
@@ -50,7 +66,9 @@ class IAMOrchestrator:
             domain_summaries = await self.mcp_client.domain_summaries()
             stage = "question_understanding"
             decomposition = await self.planner.decompose(
-                question=question, history=history, domain_summaries=domain_summaries,
+                question=question,
+                history=history,
+                domain_summaries=domain_summaries,
                 retrieval=retrieval,
             )
             policy_chunks = (
@@ -74,18 +92,28 @@ class IAMOrchestrator:
                     try:
                         if attempt == 0:
                             plan = await self.planner.create_plan(
-                                question=question, decomposition=decomposition, history=history,
-                                catalog_context=context, **limits,
+                                question=question,
+                                decomposition=decomposition,
+                                history=history,
+                                catalog_context=context,
+                                **limits,
                             )
                         else:
                             plan = await self.planner.repair_plan(
-                                question=question, decomposition=decomposition, history=history,
-                                catalog_context=context, rejected_plan=plan,
-                                rejection_reason=rejection_reason, **limits,
+                                question=question,
+                                decomposition=decomposition,
+                                history=history,
+                                catalog_context=context,
+                                rejected_plan=plan,
+                                rejection_reason=rejection_reason,
+                                **limits,
                             )
                         stage = "evidence_query"
                         evidence = await self.mcp_client.run_query(
-                            actor.principal, plan, question=question, history=history,
+                            actor.principal,
+                            plan,
+                            question=question,
+                            history=history,
                         )
                         break
                     except (ModelOutputError, MCPToolError, ValueError) as exc:
@@ -103,29 +131,42 @@ class IAMOrchestrator:
                         context["requested_entities"] = retrieval.entities
                 stage = "answer_generation"
                 answer = await self.answerer.answer_from_evidence(
-                    question=question, decomposition=decomposition, plan=plan, evidence=evidence,
-                    history=history, policy_chunks=policy_chunks,
+                    question=question,
+                    decomposition=decomposition,
+                    plan=plan,
+                    evidence=evidence,
+                    history=history,
+                    policy_chunks=policy_chunks,
                 )
             else:
                 stage = "answer_generation"
                 answer = await self.answerer.answer_general(
-                    question=question, history=history, policy_chunks=policy_chunks,
+                    question=question,
+                    history=history,
+                    policy_chunks=policy_chunks,
                 )
 
             await self.conversations.append(
                 conversation_key,
                 ConversationTurn(
-                    user_message=question, assistant_summary=answer.answer,
-                    entities=decomposition.entities, domains=decomposition.domains,
+                    user_message=question,
+                    assistant_summary=answer.answer,
+                    entities=decomposition.entities,
+                    domains=decomposition.domains,
                 ),
             )
             result = ChatWorkflowResult(
-                decomposition=decomposition, plan=plan, evidence=evidence, answer=answer,
+                decomposition=decomposition,
+                plan=plan,
+                evidence=evidence,
+                answer=answer,
             )
             stage = "report_generation"
             if report_formats and self.report_service:
                 result.reports, failures = await self.report_service.create_reports(
-                    owner=actor.principal, result=result, formats=report_formats,
+                    owner=actor.principal,
+                    result=result,
+                    formats=report_formats,
                 )
                 if failures and len(result.answer.caveats) < 8:
                     result.answer.caveats.append(
@@ -139,17 +180,22 @@ class IAMOrchestrator:
                 error = WorkflowError(stage, exc.code, str(exc))
             elif isinstance(exc, ValueError):
                 error = WorkflowError(
-                    stage, "plan_unresolved",
+                    stage,
+                    "plan_unresolved",
                     "I could not create an analysis that satisfies the evidence requirements. "
                     "Please specify the user, topic, or comparison you need.",
                 )
             else:
                 error = WorkflowError(
-                    stage, "unexpected_error", "The analysis encountered an unexpected service error."
+                    stage,
+                    "unexpected_error",
+                    "The analysis encountered an unexpected service error.",
                 )
             logger.exception(
                 "IAM request failed reference=%s stage=%s code=%s",
-                error.reference, error.stage, error.code,
+                error.reference,
+                error.stage,
+                error.code,
             )
             raise error from exc
 

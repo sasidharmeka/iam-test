@@ -96,9 +96,7 @@ def test_catalog_documents_all_22_pipeline_outputs() -> None:
 
     domain_cards = catalog.domain_summaries()
     routed_concepts = {
-        concept["name"]
-        for card in domain_cards.values()
-        for concept in card["concepts"]
+        concept["name"] for card in domain_cards.values() for concept in card["concepts"]
     }
     assert routed_concepts == EXPECTED_OUTPUTS
 

@@ -52,9 +52,10 @@ class BigQueryExecutor:
         dry_run_job = self._client.query(compiled.sql, job_config=dry_run_config)
         bytes_processed = int(dry_run_job.total_bytes_processed or 0)
         if bytes_processed > self._settings.query_max_bytes_billed:
-            raise DependencyError("bigquery_budget",
+            raise DependencyError(
+                "bigquery_budget",
                 f"Step {step.step_id!r} would process {bytes_processed} bytes; "
-                f"limit is {self._settings.query_max_bytes_billed}"
+                f"limit is {self._settings.query_max_bytes_billed}",
             )
 
         job_config = self._bigquery.QueryJobConfig(
@@ -91,7 +92,8 @@ class BigQueryExecutor:
             logger.exception("BigQuery source missing for concept=%s", step.concept)
             raise DependencyError(
                 "bigquery_not_found",
-                f"The {step.concept} output was not found. Check the dataset/project and pipeline run.",
+                f"The {step.concept} output was not found. "
+                "Check the dataset/project and pipeline run.",
             ) from exc
         except exceptions.BadRequest as exc:
             logger.exception("BigQuery rejected compiled query for concept=%s", step.concept)
@@ -100,7 +102,11 @@ class BigQueryExecutor:
                 f"The {step.concept} query did not match the live BigQuery schema. "
                 "Check Cloud Run logs for the missing column or type mismatch.",
             ) from exc
-        except (exceptions.TooManyRequests, exceptions.ServiceUnavailable, exceptions.DeadlineExceeded) as exc:
+        except (
+            exceptions.TooManyRequests,
+            exceptions.ServiceUnavailable,
+            exceptions.DeadlineExceeded,
+        ) as exc:
             logger.exception("BigQuery unavailable for concept=%s", step.concept)
             raise DependencyError(
                 "bigquery_unavailable", "BigQuery is temporarily unavailable or quota-limited."

@@ -76,12 +76,21 @@ class CatalogRetriever:
     ) -> CatalogRetrieval:
         history = history or []
         entities = list(
-            dict.fromkeys(re.sub(r"[ _-]", "", match.casefold()) for match in IDENTITY.findall(question))
+            dict.fromkeys(
+                re.sub(r"[ _-]", "", match.casefold()) for match in IDENTITY.findall(question)
+            )
         )
         search_question = question
         if FOLLOWUP.search(question) and history:
             previous = history[-1]
-            search_question += " " + previous.user_message
+            current = self._normalize(question)
+            has_current_topic = any(
+                f" {alias.casefold()} " in f" {current} "
+                for topic in self.catalog.routing_topics.values()
+                for alias in topic.aliases
+            )
+            if not has_current_topic:
+                search_question += " " + previous.user_message
             if not entities:
                 entities = list(previous.entities)
         normalized = self._normalize(search_question)
@@ -97,7 +106,9 @@ class CatalogRetriever:
         requirements: list[EvidenceRequirement] = []
         reasons: list[str] = []
         for name, topic in self.catalog.routing_topics.items():
-            aliases = [re.sub(r"[^a-z0-9]+", " ", alias.casefold()).strip() for alias in topic.aliases]
+            aliases = [
+                re.sub(r"[^a-z0-9]+", " ", alias.casefold()).strip() for alias in topic.aliases
+            ]
             if any(f" {alias} " in f" {normalized} " for alias in aliases):
                 requirements.append(EvidenceRequirement(topic=name, concepts=topic.concepts))
                 reasons.append(f"Matched catalog topic: {name}")
@@ -131,15 +142,22 @@ class CatalogRetriever:
             key = (tuple(sorted(item.concepts)), tuple(item.required_fields))
             distinct[key] = item
         requirements = [
-            item for item in distinct.values()
+            item
+            for item in distinct.values()
             if not any(
                 set(other.concepts) < set(item.concepts) and not item.required_fields
                 for other in distinct.values()
             )
         ]
-        general = bool(re.match(r"\s*(what (?:is|does)|explain|define|hello|hi\b|hey\b)", question, re.I))
+        general = bool(
+            re.match(r"\s*(what (?:is|does)|explain|define|hello|hi\b|hey\b)", question, re.I)
+        )
         project_cues = bool(
-            re.search(r"\b(our|my|this project|in the data|which|who|show|list|compare|count|rank)\b", question, re.I)
+            re.search(
+                r"\b(our|my|this project|in the data|which|who|show|list|compare|count|rank)\b",
+                question,
+                re.I,
+            )
         )
         requires_data = bool(entities) or (bool(requirements) and (not general or project_cues))
         if not requires_data:
@@ -149,10 +167,17 @@ class CatalogRetriever:
         low_confidence = not reasons
         # Broad or ambiguous questions use the complete small catalog. For specific questions,
         # union the top candidates with every explicitly matched topic; never select one domain.
-        candidates = ranked if low_confidence or broad_profile else ranked[:8]
-        candidates = list(dict.fromkeys(candidates + [c for item in requirements for c in item.concepts]))
+        candidates = (
+            ranked
+            if low_confidence or broad_profile
+            else [name for name in ranked if scores[name] > 0][:8]
+        )
+        candidates = list(
+            dict.fromkeys(candidates + [c for item in requirements for c in item.concepts])
+        )
         domains = [
-            domain for domain in self.catalog.domains
+            domain
+            for domain in self.catalog.domains
             if any(domain in self.catalog.concept(name).domains for name in candidates)
         ]
         return CatalogRetrieval(
@@ -179,7 +204,8 @@ class EvidenceCoverageValidator:
             covering = [step for step in plan.steps if step.concept in requirement.concepts]
             if requirement.required_fields:
                 covering = [
-                    step for step in covering
+                    step
+                    for step in covering
                     if step.operation == QueryOperation.RECORDS
                     and set(requirement.required_fields).issubset(
                         step.fields or self.catalog.concept(step.concept).default_fields
@@ -188,24 +214,30 @@ class EvidenceCoverageValidator:
             if not covering:
                 raise QueryPlanError(
                     f"Missing evidence for topic {requirement.topic!r}; use one of "
-                    f"{requirement.concepts}, required record fields {requirement.required_fields}. "
+                    f"{requirement.concepts}, "
+                    f"required record fields {requirement.required_fields}. "
                     "A valid table in another domain does not satisfy this topic."
                 )
         for step in plan.steps:
             concept = self.catalog.concept(step.concept)
             if retrieval.entities and not concept.user_field:
-                raise QueryPlanError("An identity-specific question cannot use unscoped global data")
+                raise QueryPlanError(
+                    "An identity-specific question cannot use unscoped global data"
+                )
             if not retrieval.entities:
                 continue
             constraints = [
-                item for item in step.filters
+                item
+                for item in step.filters
                 if item.field == concept.user_field
                 and item.operator in {FilterOperator.EQUALS, FilterOperator.IN}
             ]
             if not constraints or not any(
-                set(str(value).casefold() for value in (
-                    item.value if isinstance(item.value, list) else [item.value]
-                )) == set(retrieval.entities)
+                set(
+                    str(value).casefold()
+                    for value in (item.value if isinstance(item.value, list) else [item.value])
+                )
+                == set(retrieval.entities)
                 for item in constraints
             ):
                 raise QueryPlanError(

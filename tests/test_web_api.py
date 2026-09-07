@@ -25,7 +25,10 @@ class FakeWebVerifier:
 
 class FakeMCP:
     tool_names = (
-        "list_iam_domains", "describe_iam_domains", "search_iam_catalog", "run_iam_query",
+        "list_iam_domains",
+        "describe_iam_domains",
+        "search_iam_catalog",
+        "run_iam_query",
     )
 
     async def initialize(self) -> None:

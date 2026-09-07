@@ -6,13 +6,17 @@ import asyncio
 
 from iam_agent.errors import DependencyError
 from iam_agent.models import (
-    AnalysisPlan, CatalogRetrieval, ConversationTurn, EvidenceBundle, IAMDomain,
+    AnalysisPlan,
+    CatalogRetrieval,
+    ConversationTurn,
+    EvidenceBundle,
+    IAMDomain,
 )
 from iam_mcp.bigquery_executor import QueryExecutor
 from iam_mcp.catalog import SemanticCatalog
 from iam_mcp.compiler import QueryCompiler
-from iam_mcp.validator import QueryPlanValidator
 from iam_mcp.retrieval import CatalogRetriever, EvidenceCoverageValidator
+from iam_mcp.validator import QueryPlanValidator
 
 
 class IAMEvidenceService:
@@ -48,8 +52,12 @@ class IAMEvidenceService:
         return self.catalog.planner_context(selected)
 
     async def run_query(
-        self, *, principal: str, plan: AnalysisPlan,
-        question: str, history: list[ConversationTurn],
+        self,
+        *,
+        principal: str,
+        plan: AnalysisPlan,
+        question: str,
+        history: list[ConversationTurn],
     ) -> EvidenceBundle:
         authorized_users = self.validator.validate(plan, principal)
         # Recompute on the server from the original question. Never trust an LLM-supplied

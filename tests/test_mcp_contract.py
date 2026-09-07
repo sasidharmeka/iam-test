@@ -73,10 +73,7 @@ async def test_official_mcp_client_discovers_and_calls_read_only_tools() -> None
     domains = await client.domain_summaries()
     assert "identity_risk" in domains
     assert domains["identity_risk"]["concepts"]
-    assert any(
-        concept["name"] == "risk_scores"
-        for concept in domains["identity_risk"]["concepts"]
-    )
+    assert any(concept["name"] == "risk_scores" for concept in domains["identity_risk"]["concepts"])
 
     plan = AnalysisPlan(
         objective="Rank users",

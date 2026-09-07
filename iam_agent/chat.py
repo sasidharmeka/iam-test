@@ -96,19 +96,17 @@ class GoogleChatHandler:
             )
             response: dict[str, Any] = {"text": _render(result)}
             if include_reports and result.reports:
-                response["reports"] = [
-                    report.model_dump(mode="json") for report in result.reports
-                ]
+                response["reports"] = [report.model_dump(mode="json") for report in result.reports]
             return response
         except AuthorizationError:
             return {"text": "You are not authorized to query this IAM analytics environment."}
         except WorkflowError as exc:
-            response = {
-                "text": f"{exc} Reference: {exc.reference} ({exc.stage}, {exc.code})."
-            }
+            response = {"text": f"{exc} Reference: {exc.reference} ({exc.stage}, {exc.code})."}
             if include_reports:
                 response["error"] = {
-                    "reference": exc.reference, "stage": exc.stage, "code": exc.code,
+                    "reference": exc.reference,
+                    "stage": exc.stage,
+                    "code": exc.code,
                 }
             return response
         except (CatalogError, QueryPlanError, MCPToolError, ValueError) as exc:

@@ -45,7 +45,7 @@ class GeminiClient:
         }.get(response_model, response_model)
         if response_model is AnalysisPlan:
             system_instruction += (
-                ' Encode each filter value in value_json, e.g. "\\\"user12\\\"" or "80". '
+                ' Encode each filter value in value_json, e.g. "\\"user12\\"" or "80". '
                 "This is JSON data, never SQL. Return all listed fields; use [] for unused lists."
             )
         try:

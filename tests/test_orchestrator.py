@@ -6,7 +6,7 @@ import pytest
 
 from iam_agent.answerer import AnswerAgent
 from iam_agent.authorization import AuthorizationService, PrincipalGrant
-from iam_agent.config import Settings
+from iam_agent.config import REPOSITORY_ROOT, Settings
 from iam_agent.conversation import ConversationStore
 from iam_agent.mcp_client import MCPToolError
 from iam_agent.models import (
@@ -27,7 +27,6 @@ from iam_agent.planner import QuestionPlanner
 from iam_agent.policy_rag import PolicyStore
 from iam_mcp.catalog import SemanticCatalog
 from iam_mcp.retrieval import CatalogRetriever
-from iam_agent.config import REPOSITORY_ROOT
 
 
 class FakeModel:

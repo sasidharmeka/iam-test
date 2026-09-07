@@ -12,8 +12,10 @@ conversational IAM analyst. A user can ask broad questions such as:
 - "What is shadow access?"
 - "Export the ten riskiest users as Excel and PDF."
 
-Gemini understands the question and creates a typed semantic plan. It never writes SQL. The
-MCP evidence service validates the plan against a versioned catalog, applies the user's
+Before the first Gemini call, the MCP service searches all 22 catalog entries using the question
+and relevant conversation history. It retrieves candidate schemas across multiple domains and
+derives evidence requirements independently of Gemini. Gemini creates a typed semantic plan.
+The MCP evidence service checks both question coverage and SQL safety, applies the user's
 hierarchy scope, compiles parameterized `SELECT` statements, checks their estimated BigQuery
 cost, and returns evidence. Gemini then explains that evidence in ordinary conversation.
 For browser requests that explicitly name CSV, Excel, PDF, or Word, deterministic exporters
@@ -54,11 +56,13 @@ Gemini's semantic plan format.
 
 | Component | Responsibility |
 | --- | --- |
-| Gemini question planner | Resolves follow-ups, classifies general/data/mixed questions, and selects grounded IAM domain cards |
+| Catalog retriever | Searches all concepts before Gemini; combines topic aliases, descriptions, fields, and typo-tolerant matches; retains multiple candidates |
+| Gemini question planner | Resolves follow-ups and classifies general/data/mixed questions using already-retrieved schemas; domain labels do not gate data access |
 | MCP catalog tools | Expose approved domain, concept, field, dimension, metric, and grain descriptions |
 | Gemini query planner | Produces `AnalysisPlan` JSON using catalog vocabulary only |
 | Pydantic models | Reject malformed or structurally unsafe plans |
 | Query validator | Enforces catalog membership, organizational scope, row/time/step ceilings, and valid filters/sorts |
+| Evidence coverage validator | Independently checks matched topics, explicit identity filters, and required explanatory fields before any SQL executes |
 | SQL compiler | Maps trusted concepts and metrics to fixed tables and SQL expressions; the only code that creates SQL |
 | BigQuery executor | Dry-runs each query, enforces bytes billed, executes read-only SQL, and returns rows |
 | Gemini answerer | Explains only the returned evidence and cites only queried outputs |
@@ -75,6 +79,7 @@ iam_agent/
   authentication.py      Google web and Google Chat token verification
   authorization.py       Principal allowlist and hierarchy scopes
   planner.py             Gemini decomposition and semantic planning
+  gemini_contracts.py    Simple provider schemas converted into strict application models
   answerer.py            General and evidence-grounded responses
   orchestrator.py        Conversation workflow
   mcp_client.py           Official in-process MCP client
@@ -82,8 +87,9 @@ iam_agent/
   reporting.py           Authenticated CSV/XLSX/PDF/DOCX generation and short-lived storage
 
 iam_mcp/
-  server.py              Three read-only MCP tools
+  server.py              Four read-only MCP tools
   catalog.py             Semantic catalog loader
+  retrieval.py           Whole-catalog candidate retrieval and evidence coverage checks
   validator.py           Plan, authorization, and resource validation
   compiler.py            Deterministic semantic-plan-to-SQL compiler
   bigquery_executor.py    Dry run, byte cap, and query execution
@@ -101,16 +107,24 @@ config/
 | --- | --- | --- | --- |
 | `list_iam_domains` | None | Five routing cards covering all 22 concept names, meanings, entities, grains, and synonyms | None |
 | `describe_iam_domains` | Selected domains | Relevant concepts, schemas, metrics, and rules | None |
-| `run_iam_query` | Verified principal plus typed `AnalysisPlan` | `EvidenceBundle` | Bounded `SELECT` only |
+| `search_iam_catalog` | Verified principal, original question, and bounded history | Candidate schemas, domains, matched topics, and evidence requirements | None |
+| `run_iam_query` | Verified principal, original question/history, and typed `AnalysisPlan` | `EvidenceBundle` | Bounded `SELECT` only |
 
 Gemini does not directly call BigQuery. The orchestrator makes MCP calls on Gemini's behalf and
 passes the returned metadata/evidence back into Gemini's next structured-output call.
 
-If Gemini marks a question as project-data analysis but omits its domains, deterministic
-normalization selects all five governed cards for the detailed planning pass. If the resulting
-semantic plan is rejected, Gemini receives the catalog plus the exact validator reason for one
-repair attempt. The repaired plan goes through the complete MCP validator again; no rejected
-plan or model-generated SQL is ever executed.
+The planner receives candidate schemas before domain selection. An incorrect or empty domain
+label cannot hide those schemas. Strong question matches become deterministic evidence
+requirements: a login question needs authentication evidence; a broad user profile needs risk
+scores and timelines; risk explanations need `risk_factors`. MCP recomputes these requirements
+from the original question before executing a plan. A safe query against an unrelated table is
+rejected. One repair attempt receives the entire catalog and the rejection reason, then passes
+through all checks again. Ambiguous retrieval also keeps the entire small catalog available.
+
+This first retrieval reads trusted catalog metadata, not private BigQuery rows. Actual rows are
+retrieved only after the plan passes scope, coverage, SQL, and cost checks. Catalog matching is
+not a proof of understanding every possible question; unfamiliar terminology can still need
+clarification or a catalog alias. Gemini retains responsibility for analytical reasoning.
 
 ## Browser report exports
 

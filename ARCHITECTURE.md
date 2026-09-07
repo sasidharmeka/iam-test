@@ -33,9 +33,10 @@ repository owns authenticated read-only exploration of those outputs.
 When a Cloud Run instance starts, `iam_agent/api.py` constructs the dependency graph:
 
 1. Load settings, the principal allowlist, identity hierarchy, policy text, and semantic catalog.
-2. Create the BigQuery executor, deterministic compiler, and query validator.
+2. Create the catalog retriever, evidence coverage validator, query validator, compiler, and
+   BigQuery executor. Validate the catalog's topic-to-concept references at startup.
 3. Place those components behind `IAMEvidenceService`.
-4. Register the service's three tools on an official `MCPServer`.
+4. Register the service's four tools on an official `MCPServer`.
 5. Give the orchestrator an official MCP `Client`, a Gemini planner, an answerer, and bounded
    conversation memory.
 6. Create deterministic report exporters and a bounded, 15-minute in-memory download store.
@@ -50,32 +51,32 @@ SDK. There is one Cloud Run service and no separately exposed MCP endpoint.
 
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant F as FastAPI
+    participant F as Authenticated interface
     participant O as Orchestrator
     participant G as Gemini
     participant M as MCP service
     participant B as BigQuery
 
-    U->>F: Natural-language question
     F->>F: Verify Google token
-    F->>O: Verified principal + conversation key
+    F->>O: Question + verified principal + conversation key
     O->>O: Require query permission
+    O->>M: search_iam_catalog(question, history, principal)
+    M->>M: Search all concepts; derive topic requirements
+    M-->>O: Candidate schemas across multiple domains
     O->>M: list_iam_domains (cached)
     M-->>O: Five cards describing all 22 concepts
-    O->>G: Question + history + grounded domain cards
+    O->>G: Question + history + retrieved schemas + domain cards
     G-->>O: QuestionDecomposition
     alt Project data is required
-        O->>O: Normalize missing domains to all governed domains
-        O->>M: describe_iam_domains(selected domains)
-        M-->>O: Relevant concepts and semantic schema
-        O->>G: Create typed AnalysisPlan
+        O->>G: Plan using candidates + evidence requirements
         G-->>O: Semantic steps, no SQL
-        O->>M: run_iam_query(principal, plan)
-        M->>M: Validate scope, catalog, and limits
+        O->>M: run_iam_query(principal, question, history, plan)
+        M->>M: Recompute coverage; validate scope, catalog, limits
         opt Plan rejected
             M-->>O: Typed rejection reason
-            O->>G: Repair plan once using same catalog
+            O->>M: describe_iam_domains(all domains)
+            M-->>O: Entire catalog for bounded repair
+            O->>G: Repair once with full catalog + rejection
             G-->>O: Corrected semantic plan
             O->>M: Validate corrected plan from the beginning
         end
@@ -95,31 +96,71 @@ sequenceDiagram
         O->>O: Render deterministic report files
     end
     O-->>F: Answer + sources + caveats + file descriptors
-    F-->>U: Response and authenticated download buttons
 ```
 
 The orchestrator—not Gemini—owns every MCP call. Gemini receives domain metadata or evidence as
 input to a structured-output request. It has no Google Cloud credential and no direct database
 or MCP transport handle.
 
-## Domain routing and plan repair
+## Retrieval before domain selection
 
-The first MCP discovery result is deliberately richer than a list of five internal names. Each
-domain card contains the business description, domain synonyms, and compact name/description/
-entity/grain/synonym metadata for every tagged concept. Across the five cards, all 22 outputs are
-represented before Gemini selects a domain. Detailed fields and metrics are disclosed only after
-routing.
+The original question reaches `search_iam_catalog` before any model call. The deterministic
+retriever searches all 22 concepts using names, descriptions, entities, grain, synonyms, fields,
+and metrics. Explicit topic aliases in `config/semantic_catalog.yaml` add stronger matches.
+Long alphabetic tokens tolerate close spelling mistakes; identity values are not fuzzy-matched.
+An explicit follow-up carries the previous turn's identities and, when needed, its topic.
 
-`QuestionPlanner` then normalizes the structured result. A `data` or `mixed` answer always means
-project data is required. When such a response contains no usable domain, all five governed
-domains are selected. This is a completeness fallback, not broader data permission: hierarchy,
-catalog, row, lookback, step, and byte limits still apply to every generated plan.
+The result contains multiple candidate concepts and their detailed schemas, derived domain
+labels, reasons, and evidence requirements. Specific questions retain up to eight scored
+candidates plus every concept needed by matched topics. Broad identity profiles and low-confidence
+retrieval retain all 22. This is metadata retrieval: no BigQuery rows are scanned at this stage.
+Authorized rows are retrieved after plan validation and dry-run cost checks, before narration.
 
-An MCP validation rejection is returned as a typed tool result. The orchestrator allows exactly
-one repair call with the rejected semantic plan, the trusted catalog context, and the rejection
-reason. The replacement plan is not patched or trusted locally; it is resubmitted through the
-same complete MCP validation, compilation, dry-run, and execution boundary. A second rejection
-stops the request and produces a safe reference ID for logs.
+Gemini sees the retrieved fields and metrics before classifying the question. Its domain labels
+are descriptive and no longer determine which schemas the query planner is allowed to see.
+Strong retrieval evidence also prevents a named identity question from being treated as general
+knowledge just because Gemini omits a domain or produces an invalid decomposition.
+
+## Deterministic evidence coverage and repair
+
+SQL safety alone cannot detect a safe query against the wrong business data. After the existing
+query validator runs, `EvidenceCoverageValidator` checks the plan against requirements recomputed
+inside MCP from the original question and bounded history, rather than model-supplied labels.
+
+| Question | Independent requirement | Rejected example |
+| --- | --- | --- |
+| Authentication anomalies | At least one approved authentication detection concept | Only `stale_access` from provisioning |
+| MFA bypasses and stale access | Evidence for both matched topics | Only the MFA table |
+| Which users are riskiest, and why? | `risk_scores` records including `risk_factors` | An aggregate maximum with no explanatory factors |
+| Tell me about user12 | Risk scores and timeline evidence, with exact identity filters on every step | Unfiltered company-wide records or only a risk aggregate |
+
+Malformed model output or a rejected plan gets one repair attempt with the entire catalog and
+the exact validation reason. The repaired plan passes every check again. Repeated rejection
+executes no rejected SQL. Permission, quota, unavailable-service, missing-table, and byte-budget
+failures are dependency errors; they do not trigger semantic replanning or weaker validation.
+Successful independent steps can still produce a partial answer, with failed sources explicitly
+listed in caveats. Only successful tables can appear as evidence sources.
+
+These checks cover the maintained catalog topics, not every possible interpretation of natural
+language. Unrecognized vocabulary keeps the complete catalog available; ambiguous intent can
+still require clarification. Adding an output means updating its schema and topic aliases in the
+catalog and testing the intended evidence requirements. A larger catalog may later need hybrid
+lexical/vector retrieval, but retrieval scores must never grant authorization.
+
+| Implementation | Responsibility |
+| --- | --- |
+| `config/semantic_catalog.yaml` | Versioned meanings, schemas, aliases, and topic-to-concept mapping |
+| `iam_mcp/retrieval.py` | Candidate ranking, broad fallback, topic and identity coverage checks |
+| `iam_agent/orchestrator.py` | Retrieval-first sequence, one repair, dependency error handling |
+| `iam_agent/gemini_contracts.py` | Provider-friendly structured output converted to strict application models |
+| `iam_mcp/validator.py` and `compiler.py` | Scope and SQL safety, parameterized SQL generation |
+| `iam_mcp/bigquery_executor.py` | Dry runs, bounded reads, classified upstream failures |
+
+The Gemini wire contract encodes a filter value as a JSON string to avoid a deeply branching
+provider schema. The adapter decodes that value and runs the full application model validation.
+This changes only the provider boundary; the MCP semantic plan still uses typed filter values.
+Every failed request is logged with a reference, workflow stage, error code, and original
+exception chain. The browser receives the safe category and reference, not the raw traceback.
 
 ## How a question becomes SQL
 
@@ -160,7 +201,7 @@ query. User strings never become SQL identifiers or SQL fragments.
 
 | Term | Technical meaning | BigQuery relationship |
 | --- | --- | --- |
-| Domain | Compact business topic used during first-pass routing | Groups relevant outputs so Gemini does not need all 22 schemas on every request |
+| Domain | Business label derived from retrieved candidates | Groups relevant outputs without acting as a single model-selected gate |
 | Concept | Governed analytical object | Maps one-to-one to an allowlisted output table, such as `risk_scores` |
 | Entity | Thing represented by the rows | Usually an identity, event, session, identity-application pair, or aggregate window |
 | Grain | Exact meaning of one row | Prevents invalid reasoning, such as treating one user-app row as one whole user |

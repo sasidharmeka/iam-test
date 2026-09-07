@@ -10,7 +10,11 @@ from mcp.server.mcpserver import MCPServer
 
 from iam_agent.errors import DependencyError
 from iam_agent.models import (
-    AnalysisPlan, CatalogRetrieval, ConversationTurn, EvidenceBundle, IAMDomain,
+    AnalysisPlan,
+    CatalogRetrieval,
+    ConversationTurn,
+    EvidenceBundle,
+    IAMDomain,
 )
 
 
@@ -40,7 +44,12 @@ class IAMEvidenceMCPClient:
         self._domain_cache = {
             str(name): dict(card) for name, card in payload.get("domains", {}).items()
         }
-        required = {"list_iam_domains", "describe_iam_domains", "search_iam_catalog", "run_iam_query"}
+        required = {
+            "list_iam_domains",
+            "describe_iam_domains",
+            "search_iam_catalog",
+            "run_iam_query",
+        }
         if not required.issubset(self._tool_names):
             missing = ", ".join(sorted(required - set(self._tool_names)))
             raise MCPToolError(f"IAM MCP server is missing required tools: {missing}")
@@ -62,20 +71,30 @@ class IAMEvidenceMCPClient:
     ) -> CatalogRetrieval:
         result = await self._call(
             "search_iam_catalog",
-            {"principal": principal, "question": question,
-             "history": [turn.model_dump(mode="json") for turn in history]},
+            {
+                "principal": principal,
+                "question": question,
+                "history": [turn.model_dump(mode="json") for turn in history],
+            },
         )
         return CatalogRetrieval.model_validate(self._payload(result))
 
     async def run_query(
-        self, principal: str, plan: AnalysisPlan, *, question: str,
+        self,
+        principal: str,
+        plan: AnalysisPlan,
+        *,
+        question: str,
         history: list[ConversationTurn] | None = None,
     ) -> EvidenceBundle:
         result = await self._call(
             "run_iam_query",
-            {"principal": principal, "plan": plan.model_dump(mode="json"),
-             "question": question,
-             "history": [turn.model_dump(mode="json") for turn in (history or [])]},
+            {
+                "principal": principal,
+                "plan": plan.model_dump(mode="json"),
+                "question": question,
+                "history": [turn.model_dump(mode="json") for turn in (history or [])],
+            },
         )
         payload = self._payload(result)
         if payload.get("ok") is False:

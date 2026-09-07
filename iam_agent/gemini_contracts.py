@@ -65,7 +65,7 @@ class GeminiDecomposition(BaseModel):
     def to_application(self) -> QuestionDecomposition:
         payload = self.model_dump(mode="json")
         allowed = {domain.value for domain in IAMDomain}
-        payload["domains"] = list(dict.fromkeys(
-            domain for domain in self.domains if domain in allowed
-        ))
+        payload["domains"] = list(
+            dict.fromkeys(domain for domain in self.domains if domain in allowed)
+        )
         return QuestionDecomposition.model_validate(payload)

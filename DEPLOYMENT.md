@@ -4,6 +4,42 @@ This guide covers the complete path from a fresh Google Cloud Shell to the authe
 interface. The GitHub Actions workflow builds and deploys the application after the one-time
 Google Cloud setup.
 
+## Updating an already working deployment to 3.2
+
+No new environment variables, secrets, IAM roles, or database are required for catalog-first
+routing, evidence coverage checks, or report exports. Keep the existing `dev` values. Run
+**Actions > Deploy read-only IAM agent > Run workflow**, select branch `main` and environment
+`dev`, and wait for success. Reload the existing Cloud Run web page.
+
+Open the service's `/healthz` URL. It should show `"version":"3.2"`, the deployed revision, and
+four MCP tools including `search_iam_catalog`. This confirms which code is serving requests;
+health alone does not verify live Gemini or BigQuery access. Test these exact requests:
+
+```text
+Which users are riskiest, and why?
+Tell me about user12.
+Show MFA bypasses and stale access for user12.
+```
+
+If a data question still fails, the response now names the stage and error category. From an
+existing authenticated Cloud Shell checkout, inspect its reference without changing resources:
+
+```bash
+cd "${HOME}/multi-agent-iam-demo"
+git pull --ff-only origin main
+bash scripts/diagnose_iam_agent.sh
+# To restrict the last seven days of logs to one response, supply its reference:
+bash scripts/diagnose_iam_agent.sh cae4f48ad410
+bash scripts/diagnose_iam_agent.sh d3057a9fd55d
+```
+
+Use a reference from a new response if the older logs have expired. The helper displays the
+active account, service revision, runtime identity, and application errors. It does not change
+permissions or query identity rows. `bigquery_permission`, `bigquery_not_found`, `bigquery_schema`,
+`gemini_request_rejected`, and `gemini_permission` identify different failure categories; the
+logged underlying exception supplies the specific cause. A greeting succeeding only verifies
+the general-answer path, not the structured planning and BigQuery path.
+
 ## What changed from the remediation demo
 
 The read-only application does not use:
@@ -289,7 +325,8 @@ if [[ -n "${SERVICE_URL}" ]]; then
 fi
 ```
 
-A healthy response includes `"mode":"read-only"` and the three MCP tool names.
+A healthy response includes `"mode":"read-only"`, `"version":"3.2"`, the revision, and the four
+MCP tool names.
 
 View recent application logs with:
 

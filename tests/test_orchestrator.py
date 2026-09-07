@@ -164,7 +164,7 @@ async def test_data_question_uses_mcp_plan_evidence_and_grounded_answer(tmp_path
     assert result.answer.sources == ["risk_scores"]
     assert mcp.described == []  # Candidate schemas are retrieved before Gemini's domain choice.
     assert len(mcp.plans) == 1
-    assert model.response_models == [QuestionDecomposition, AnalysisPlan, AnalystAnswer]
+    assert model.response_models == [QuestionDecomposition, AnalystAnswer]
 
 
 @pytest.mark.asyncio
@@ -203,7 +203,6 @@ async def test_rejected_plan_is_repaired_once_before_answering(tmp_path) -> None
     assert len(mcp.plans) == 2
     assert model.response_models == [
         QuestionDecomposition,
-        AnalysisPlan,
         AnalysisPlan,
         AnalystAnswer,
     ]

@@ -77,6 +77,17 @@ async def test_adapter_uses_wire_schema_and_validates_response():
             system_instruction="Plan", prompt="Q", response_model=AnalysisPlan
         )
 
+    draft = wire_plan('"example-value-not-for-diagnostics"')
+    draft["steps"][0]["operation"] = "rank"
+    generate.return_value = SimpleNamespace(parsed=None, text=json.dumps(draft))
+    with pytest.raises(ModelOutputError) as failure:
+        await client.generate_structured(
+            system_instruction="Plan", prompt="Q", response_model=AnalysisPlan
+        )
+    assert "steps.0" in str(failure.value)
+    assert "require at least one metric" in str(failure.value)
+    assert "example-value-not-for-diagnostics" not in str(failure.value)
+
 
 @pytest.mark.asyncio
 async def test_model_permission_error_is_not_misreported_as_a_domain_failure():

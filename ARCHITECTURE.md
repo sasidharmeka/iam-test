@@ -162,6 +162,30 @@ This changes only the provider boundary; the MCP semantic plan still uses typed 
 Every failed request is logged with a reference, workflow stage, error code, and original
 exception chain. The browser receives the safe category and reference, not the raw traceback.
 
+## Historical data and common ranking plans
+
+`iam_mcp/time_policy.py` applies the date policy inside the authorized MCP query boundary.
+Without an explicit period in the original question, it clears `time_range_days` and filters on
+catalog fields typed as dates or timestamps. All retained history remains eligible. An explicit
+date, year, relative period, or reference to a previously stated period preserves date filters.
+The former maximum-lookback configuration is no longer used. Row, step, byte, and identity scope
+checks run on the resulting plan before compilation. Each evidence result records the actual
+filters and relative window applied, and the bundle reports its time scope for narration/exports.
+
+`iam_agent/standard_plans.py` recognizes a narrowly bounded, unconstrained highest-risk ranking.
+It constructs a semantic plan using the catalog's `maximum_risk_score` metric grouped by `user`,
+descending score order, an identity tie-break, and a bounded result limit. For "and why", ordered
+risk records include contributing factors. Requests containing dates, named users, departments,
+applications, or other unfamiliar constraints go through Gemini's normal planning path. This
+does not introduce raw SQL or replace the general analyst with a list of canned questions.
+Standard plans pass through the same MCP time, scope, coverage, and byte checks as model plans.
+
+Structured-output repair now receives the failing field paths and validation reasons rather
+than a generic invalid-output message. Raw model output and filter values are excluded from that
+diagnostic summary. A planning failure must not be blamed on an empty BigQuery time window:
+the query has not run at that stage. An empty scoped query also does not prove the whole table
+contains no data. The answerer uses the executed query's scope to explain these distinctions.
+
 ## How a question becomes SQL
 
 Consider: "Show the ten riskiest Finance users."

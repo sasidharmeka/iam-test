@@ -85,7 +85,6 @@ class IAMOrchestrator:
                 limits = {
                     "maximum_steps": self.settings.query_max_steps,
                     "maximum_rows": self.settings.query_max_rows,
-                    "maximum_lookback_days": self.settings.query_max_lookback_days,
                 }
                 rejection_reason = ""
                 for attempt in range(2):

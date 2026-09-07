@@ -164,6 +164,24 @@ def test_validator_and_compiler_create_only_allowlisted_read_query() -> None:
     assert len(authorized_users) == len(identities.users_within("/company")) == 50
 
 
+def test_explicit_year_long_lookback_is_not_rejected_by_the_old_90_day_cap() -> None:
+    _, _, _, validator, compiler = dependencies()
+    step = QueryStep(
+        step_id="historical_mfa",
+        purpose="Requested year-long analysis",
+        concept="mfa_bypass_events",
+        operation="records",
+        time_range_days=365,
+        limit=5,
+    )
+    users = validator.validate(
+        AnalysisPlan(objective="History", steps=[step]), "analyst@example.com"
+    )
+    query = compiler.compile(step, users)
+    assert "@start_date" in query.sql
+    assert next(p.value for p in query.parameters if p.name == "start_date").year == 2025
+
+
 def test_virtual_department_filter_is_resolved_from_identity_directory() -> None:
     _, _, _, validator, compiler = dependencies("/company/finance")
     step = QueryStep(

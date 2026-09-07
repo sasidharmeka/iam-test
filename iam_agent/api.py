@@ -121,7 +121,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         yield
         await app.state.container.gemini.close()
 
-    app = FastAPI(title="Read-only IAM Analytics Agent", version="3.2.0", lifespan=lifespan)
+    app = FastAPI(title="Read-only IAM Analytics Agent", version="3.3.0", lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
@@ -129,7 +129,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         return {
             "status": "ok",
             "mode": "read-only",
-            "version": "3.2.0",
+            "version": "3.3.0",
             "revision": os.environ.get("K_REVISION", "local"),
             "mcp_tools": list(runtime.mcp_client.tool_names),
         }

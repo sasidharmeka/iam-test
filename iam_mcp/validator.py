@@ -63,11 +63,6 @@ class QueryPlanValidator:
                 f"Step {step.step_id!r} requests {step.limit} rows; "
                 f"maximum is {self.settings.query_max_rows}"
             )
-        if step.time_range_days and step.time_range_days > self.settings.query_max_lookback_days:
-            raise QueryPlanError(
-                f"Step {step.step_id!r} exceeds the "
-                f"{self.settings.query_max_lookback_days}-day limit"
-            )
         if not concept.user_field and normalize_scope(granted_scope) not in {"/", "/company"}:
             raise QueryPlanError(
                 f"Concept {step.concept!r} is organization-wide and cannot be safely scoped"

@@ -16,6 +16,7 @@ from iam_mcp.bigquery_executor import QueryExecutor
 from iam_mcp.catalog import SemanticCatalog
 from iam_mcp.compiler import QueryCompiler
 from iam_mcp.retrieval import CatalogRetriever, EvidenceCoverageValidator
+from iam_mcp.time_policy import QueryTimePolicy
 from iam_mcp.validator import QueryPlanValidator
 
 
@@ -34,6 +35,7 @@ class IAMEvidenceService:
         self.executor = executor
         self.retriever = CatalogRetriever(catalog)
         self.coverage = EvidenceCoverageValidator(catalog)
+        self.time_policy = QueryTimePolicy(catalog)
 
     def search_catalog(
         self, *, principal: str, question: str, history: list[ConversationTurn]
@@ -59,6 +61,8 @@ class IAMEvidenceService:
         question: str,
         history: list[ConversationTurn],
     ) -> EvidenceBundle:
+        self.validator.authorization.require_query(principal)
+        plan, time_scope = self.time_policy.apply(plan, question, history)
         authorized_users = self.validator.validate(plan, principal)
         # Recompute on the server from the original question. Never trust an LLM-supplied
         # domain, topic requirement, or claim that it already passed coverage validation.
@@ -72,7 +76,7 @@ class IAMEvidenceService:
             return_exceptions=True,
         )
         successful = []
-        warnings = []
+        warnings = [time_scope]
         for step, result in zip(plan.steps, results, strict=True):
             if isinstance(result, BaseException):
                 if not isinstance(result, DependencyError):

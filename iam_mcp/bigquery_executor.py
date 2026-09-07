@@ -74,6 +74,8 @@ class BigQueryExecutor:
             row_count=len(rows),
             bytes_processed=bytes_processed,
             truncated=len(rows) >= compiled.limit,
+            time_range_days=step.time_range_days,
+            applied_filters=step.filters,
         )
 
     async def execute(self, compiled: CompiledQuery, step: QueryStep) -> QueryStepResult:

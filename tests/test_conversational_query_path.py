@@ -1,5 +1,6 @@
 """Regression coverage through the real MCP protocol and BigQuery SDK parameter builder."""
 
+import json
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
@@ -151,7 +152,7 @@ async def test_screenshot_questions_and_wrong_domain_repair_use_real_mcp(questio
     transport = BigQueryTransport()
     response = await ask(handler(model, transport), question)
     assert "error" not in response, response
-    assert model.plans == 2
+    assert model.plans == (0 if "riskiest" in question else 2)
     assert transport.queries
     assert not any(".stale_access`" in sql for sql in transport.queries)
 
@@ -174,7 +175,7 @@ async def test_cloud_permission_failure_is_named_and_does_not_trigger_replanning
     response = await ask(handler(model, BigQueryTransport(forbidden=True)), question)
     assert response["error"]["code"] == "bigquery_permission"
     assert response["error"]["stage"] == "evidence_query"
-    assert model.plans == 1
+    assert model.plans == 0
 
 
 @pytest.mark.asyncio
@@ -194,3 +195,73 @@ async def test_greeting_has_no_bigquery_access():
     response = await ask(handler(PlanningModel(target="hello", general=True), transport), "hello")
     assert "error" not in response
     assert transport.queries == []
+
+
+@pytest.mark.asyncio
+async def test_plain_risk_ranking_does_not_depend_on_generated_plan_json():
+    question = "which users are the riskiest"
+    model = PlanningModel(target=question, always_wrong=True)
+    transport = BigQueryTransport()
+    response = await ask(handler(model, transport), question)
+    assert "error" not in response, response
+    assert model.plans == 0
+    assert all(
+        "MAX(t.risk_score)" in sql or "MAX(t.`risk_score`)" in sql
+        for sql in transport.queries
+    )
+    assert all("GROUP BY 1" in sql for sql in transport.queries)
+    assert all("ORDER BY `maximum_risk_score` DESC" in sql for sql in transport.queries)
+    assert all("@start_date" not in sql for sql in transport.queries)
+
+
+class HistoricalTransport(BigQueryTransport):
+    """Model the relevant BigQuery date predicate against a retained 2025 record."""
+
+    def query(self, sql, *, job_config):
+        job = super().query(sql, job_config=job_config)
+        old_date = date(2025, 1, 15)
+        starts = [p.value for p in job_config.query_parameters if p.name == "start_date"]
+        rows = (
+            [] if starts and starts[0] > old_date
+            else [{"user": "user12", "app": "demo-app", "event_date": old_date}]
+        )
+        job.result = lambda: rows
+        return job
+
+
+class HistoricalMFAModel(PlanningModel):
+    async def generate_structured(self, *, response_model, prompt, **kwargs):
+        if response_model is AnalysisPlan:
+            self.plans += 1
+            return AnalysisPlan(
+                objective="Read MFA events",
+                steps=[
+                    QueryStep(
+                        step_id="mfa",
+                        purpose="Read MFA events",
+                        concept="mfa_bypass_events",
+                        operation="records",
+                        time_range_days=30,
+                        limit=5,
+                    )
+                ],
+            )
+        if response_model is AnalystAnswer:
+            payload = json.loads(prompt.split("<BEGIN_CONTEXT>\n")[1].split("\n<END_CONTEXT>")[0])
+            result = payload["evidence"]["results"][0]
+            assert result["time_range_days"] is None
+            assert result["rows"][0]["event_date"] == "2025-01-15"
+            return AnalystAnswer(answer="MFA evidence from January 2025.")
+        return await super().generate_structured(response_model=response_model, prompt=prompt)
+
+
+@pytest.mark.asyncio
+async def test_mfa_question_retrieves_year_old_rows_despite_a_model_added_30_day_window():
+    question = "tell me abit mfa bypasses"
+    transport = HistoricalTransport()
+    response = await ask(handler(HistoricalMFAModel(target=question), transport), question)
+    assert "error" not in response, response
+    assert "MFA evidence from January 2025" in response["text"]
+    assert "all retained dates" in response["text"]
+    assert transport.queries
+    assert all("@start_date" not in sql for sql in transport.queries)

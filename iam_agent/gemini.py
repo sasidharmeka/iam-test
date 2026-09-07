@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from iam_agent.errors import DependencyError, ModelOutputError
 from iam_agent.gemini_contracts import GeminiAnalysisPlan, GeminiDecomposition
@@ -14,6 +14,18 @@ if TYPE_CHECKING:
     from iam_agent.config import Settings
 
 OutputModel = TypeVar("OutputModel", bound=BaseModel)
+
+
+def _output_error(response_model: type[BaseModel], exc: Exception) -> ModelOutputError:
+    detail = "Return complete JSON matching the structured schema."
+    if isinstance(exc, ValidationError):
+        # Preserve useful validator diagnostics for repair without copying values or raw output.
+        errors = exc.errors(include_url=False, include_input=False, include_context=False)
+        detail = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or 'plan'}: {item['msg']}"
+            for item in errors[:5]
+        )
+    return ModelOutputError(f"Invalid {response_model.__name__} output. {detail}")
 
 
 class GeminiClient:
@@ -59,6 +71,8 @@ class GeminiClient:
                     temperature=0.1,
                 ),
             )
+        except (ValidationError, ValueError) as exc:
+            raise _output_error(response_model, exc) from exc
         except Exception as exc:
             status = getattr(exc, "code", None)
             if status == 400:
@@ -84,10 +98,7 @@ class GeminiClient:
                 return parsed.to_application()
             return response_model.model_validate(parsed)
         except (ValueError, TypeError) as exc:
-            raise ModelOutputError(
-                f"Invalid {response_model.__name__} output; regenerate all required fields "
-                "and use the supplied catalog and operation rules."
-            ) from exc
+            raise _output_error(response_model, exc) from exc
 
     async def close(self) -> None:
         await self._client.aclose()

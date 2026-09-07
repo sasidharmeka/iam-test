@@ -4,14 +4,14 @@ This guide covers the complete path from a fresh Google Cloud Shell to the authe
 interface. The GitHub Actions workflow builds and deploys the application after the one-time
 Google Cloud setup.
 
-## Updating an already working deployment to 3.2
+## Updating an already working deployment to 3.3
 
 No new environment variables, secrets, IAM roles, or database are required for catalog-first
 routing, evidence coverage checks, or report exports. Keep the existing `dev` values. Run
 **Actions > Deploy read-only IAM agent > Run workflow**, select branch `main` and environment
 `dev`, and wait for success. Reload the existing Cloud Run web page.
 
-Open the service's `/healthz` URL. It should show `"version":"3.2"`, the deployed revision, and
+Open the service's `/healthz` URL. It should show `"version":"3.3.0"`, the deployed revision, and
 four MCP tools including `search_iam_catalog`. This confirms which code is serving requests;
 health alone does not verify live Gemini or BigQuery access. Test these exact requests:
 
@@ -19,7 +19,20 @@ health alone does not verify live Gemini or BigQuery access. Test these exact re
 Which users are riskiest, and why?
 Tell me about user12.
 Show MFA bypasses and stale access for user12.
+Tell me about MFA bypasses.
 ```
+
+Version 3.3 uses all retained dates by default. The server removes model-added rolling windows
+and date filters when the user has not explicitly requested dates. The maximum-lookback setting
+has been removed: an old `QUERY_MAX_LOOKBACK_DAYS` GitHub variable is ignored and can stay as-is.
+An explicit request such as "in 2025" or "during the last 365 days" can still filter dates.
+Existing identity authorization, row, step, and byte limits continue to apply. Answers report the
+applied time scope and distinguish historical observations from current risk.
+
+The plain "which users are the riskiest" request uses a governed plan grouped by identity and
+sorted by maximum stored risk score, without asking Gemini to generate the plan. More complex
+questions still use Gemini with the catalog and deterministic validators. A `query_planning`
+error happens before BigQuery executes and is separate from a successful query returning no rows.
 
 If a data question still fails, the response now names the stage and error category. From an
 existing authenticated Cloud Shell checkout, inspect its reference without changing resources:
@@ -139,7 +152,6 @@ Create these Environment variables, not repository secrets:
 | `BIGQUERY_DATASET` | `iam_data_dev` | Yes |
 | `QUERY_MAX_ROWS` | `500` | No; valid range 1-5000 |
 | `QUERY_MAX_BYTES_BILLED` | `500000000` | No; 500 MB per query step |
-| `QUERY_MAX_LOOKBACK_DAYS` | `90` | No |
 | `QUERY_MAX_STEPS` | `6` | No; maximum 8 |
 | `WEB_GOOGLE_CLIENT_ID` | Your existing OAuth web client ID | Yes |
 | `WEB_ANALYST_PRINCIPALS` | Your exact Gmail or Workspace email; comma-separate multiple users | Yes |
@@ -180,7 +192,6 @@ gh variable set BIGQUERY_PROJECT --env dev --repo "${REPOSITORY}" --body 'rapid-
 gh variable set BIGQUERY_DATASET --env dev --repo "${REPOSITORY}" --body 'iam_data_dev'
 gh variable set QUERY_MAX_ROWS --env dev --repo "${REPOSITORY}" --body '500'
 gh variable set QUERY_MAX_BYTES_BILLED --env dev --repo "${REPOSITORY}" --body '500000000'
-gh variable set QUERY_MAX_LOOKBACK_DAYS --env dev --repo "${REPOSITORY}" --body '90'
 gh variable set QUERY_MAX_STEPS --env dev --repo "${REPOSITORY}" --body '6'
 gh variable set WEB_GOOGLE_CLIENT_ID --env dev --repo "${REPOSITORY}" --body "${WEB_CLIENT_ID}"
 gh variable set WEB_ANALYST_PRINCIPALS --env dev --repo "${REPOSITORY}" --body "${ANALYST_EMAIL}"
@@ -325,7 +336,7 @@ if [[ -n "${SERVICE_URL}" ]]; then
 fi
 ```
 
-A healthy response includes `"mode":"read-only"`, `"version":"3.2"`, the revision, and the four
+A healthy response includes `"mode":"read-only"`, `"version":"3.3.0"`, the revision, and the four
 MCP tool names.
 
 View recent application logs with:

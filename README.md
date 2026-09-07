@@ -61,7 +61,9 @@ Gemini's semantic plan format.
 | MCP catalog tools | Expose approved domain, concept, field, dimension, metric, and grain descriptions |
 | Gemini query planner | Produces `AnalysisPlan` JSON using catalog vocabulary only |
 | Pydantic models | Reject malformed or structurally unsafe plans |
-| Query validator | Enforces catalog membership, organizational scope, row/time/step ceilings, and valid filters/sorts |
+| Time policy | Uses all retained dates by default; removes date filters Gemini adds without a user-requested period |
+| Standard plans | Compiles an unambiguous highest-risk ranking into a governed semantic plan without model-generated plan JSON |
+| Query validator | Enforces catalog membership, organizational scope, row/step ceilings, and valid filters/sorts |
 | Evidence coverage validator | Independently checks matched topics, explicit identity filters, and required explanatory fields before any SQL executes |
 | SQL compiler | Maps trusted concepts and metrics to fixed tables and SQL expressions; the only code that creates SQL |
 | BigQuery executor | Dry-runs each query, enforces bytes billed, executes read-only SQL, and returns rows |
@@ -80,6 +82,7 @@ iam_agent/
   authorization.py       Principal allowlist and hierarchy scopes
   planner.py             Gemini decomposition and semantic planning
   gemini_contracts.py    Simple provider schemas converted into strict application models
+  standard_plans.py      Governed plans for straightforward highest-risk rankings
   answerer.py            General and evidence-grounded responses
   orchestrator.py        Conversation workflow
   mcp_client.py           Official in-process MCP client
@@ -90,6 +93,7 @@ iam_mcp/
   server.py              Four read-only MCP tools
   catalog.py             Semantic catalog loader
   retrieval.py           Whole-catalog candidate retrieval and evidence coverage checks
+  time_policy.py         Explicit-date policy, with all retained history as the default
   validator.py           Plan, authorization, and resource validation
   compiler.py            Deterministic semantic-plan-to-SQL compiler
   bigquery_executor.py    Dry run, byte cap, and query execution
@@ -156,6 +160,13 @@ domain when it supports cross-domain questions.
 
 The catalog records each output's physical schema, business meaning, row grain, time field,
 user field, safe dimensions, safe filters, metrics, synonyms, and default display fields.
+
+Questions without an explicit date range query all retained history, including year-old data.
+There is no automatic last-30-days filter or maximum lookback restriction. Explicit date requests
+still work, subject to the same authorization and byte limits. The plain "which users are the
+riskiest" request uses a fixed semantic ranking plan with `maximum_risk_score` grouped by `user`.
+Gemini explains the resulting evidence. Additional constraints, comparisons, and other questions
+continue through the general planning path. Historical scores are not presented as current risk.
 
 ## Quick deployment
 

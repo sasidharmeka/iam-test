@@ -29,7 +29,6 @@ class Settings(BaseSettings):
     bigquery_dataset: str = "iam_data_dev"
     query_max_rows: int = Field(default=500, ge=1, le=5000)
     query_max_bytes_billed: int = Field(default=500_000_000, ge=1_000_000)
-    query_max_lookback_days: int = Field(default=90, ge=1, le=3660)
     query_max_steps: int = Field(default=6, ge=1, le=8)
 
     authorization_config: Path = REPOSITORY_ROOT / "config" / "authorization.yaml"

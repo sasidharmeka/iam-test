@@ -180,6 +180,8 @@ class QueryStepResult(BaseModel):
     row_count: int
     bytes_processed: int = 0
     truncated: bool = False
+    time_range_days: int | None = None
+    applied_filters: list[QueryFilter] = Field(default_factory=list)
 
 
 class EvidenceRequirement(BaseModel):

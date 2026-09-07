@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,7 +121,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         yield
         await app.state.container.gemini.close()
 
-    app = FastAPI(title="Read-only IAM Analytics Agent", version="3.1.0", lifespan=lifespan)
+    app = FastAPI(title="Read-only IAM Analytics Agent", version="3.2.0", lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
@@ -128,6 +129,8 @@ def create_app(container: Container | None = None) -> FastAPI:
         return {
             "status": "ok",
             "mode": "read-only",
+            "version": "3.2.0",
+            "revision": os.environ.get("K_REVISION", "local"),
             "mcp_tools": list(runtime.mcp_client.tool_names),
         }
 

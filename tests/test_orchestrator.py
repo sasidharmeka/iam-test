@@ -25,6 +25,9 @@ from iam_agent.models import (
 from iam_agent.orchestrator import IAMOrchestrator
 from iam_agent.planner import QuestionPlanner
 from iam_agent.policy_rag import PolicyStore
+from iam_mcp.catalog import SemanticCatalog
+from iam_mcp.retrieval import CatalogRetriever
+from iam_agent.config import REPOSITORY_ROOT
 
 
 class FakeModel:
@@ -79,6 +82,10 @@ class FakeMCPClient:
         self.plans: list[AnalysisPlan] = []
         self.reject_first_plan = reject_first_plan
 
+    async def search_catalog(self, principal, question, history):
+        catalog = SemanticCatalog.from_yaml(REPOSITORY_ROOT / "config/semantic_catalog.yaml")
+        return CatalogRetriever(catalog).retrieve(question, history)
+
     async def domain_summaries(self) -> dict[str, dict]:
         return {
             "identity_risk": {
@@ -95,7 +102,7 @@ class FakeMCPClient:
             "concepts": [{"concept": "risk_scores", "metrics": ["maximum_risk_score"]}],
         }
 
-    async def run_query(self, principal: str, plan: AnalysisPlan) -> EvidenceBundle:
+    async def run_query(self, principal: str, plan: AnalysisPlan, **kwargs) -> EvidenceBundle:
         assert principal == "analyst@example.com"
         self.plans.append(plan)
         if self.reject_first_plan and len(self.plans) == 1:
@@ -156,7 +163,7 @@ async def test_data_question_uses_mcp_plan_evidence_and_grounded_answer(tmp_path
     assert result.plan is not None
     assert result.evidence is not None
     assert result.answer.sources == ["risk_scores"]
-    assert mcp.described == [[IAMDomain.IDENTITY_RISK]]
+    assert mcp.described == []  # Candidate schemas are retrieved before Gemini's domain choice.
     assert len(mcp.plans) == 1
     assert model.response_models == [QuestionDecomposition, AnalysisPlan, AnalystAnswer]
 

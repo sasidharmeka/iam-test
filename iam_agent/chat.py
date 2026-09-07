@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from iam_agent.authorization import AuthorizationError
+from iam_agent.errors import WorkflowError
 from iam_agent.mcp_client import MCPToolError
 from iam_agent.models import ChatActor, ChatWorkflowResult
 from iam_agent.orchestrator import IAMOrchestrator
@@ -101,13 +102,22 @@ class GoogleChatHandler:
             return response
         except AuthorizationError:
             return {"text": "You are not authorized to query this IAM analytics environment."}
+        except WorkflowError as exc:
+            response = {
+                "text": f"{exc} Reference: {exc.reference} ({exc.stage}, {exc.code})."
+            }
+            if include_reports:
+                response["error"] = {
+                    "reference": exc.reference, "stage": exc.stage, "code": exc.code,
+                }
+            return response
         except (CatalogError, QueryPlanError, MCPToolError, ValueError) as exc:
             reference = uuid4().hex[:12]
             logger.warning("Safe analytical request rejected [%s]: %s", reference, exc)
             return {
                 "text": (
-                    "I could not build a safe query for that request, even after one automatic "
-                    f"plan repair. Try narrowing or rephrasing it. Reference: {reference}"
+                    "I could not build a safe query for that request. "
+                    f"Try narrowing or rephrasing it. Reference: {reference}"
                 )
             }
         except Exception:

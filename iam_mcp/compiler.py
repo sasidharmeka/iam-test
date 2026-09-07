@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from iam_agent.authorization import IdentityDirectory
-from iam_agent.config import Settings
 from iam_agent.models import (
     CompiledQuery,
     FilterOperator,
@@ -18,6 +18,9 @@ from iam_agent.models import (
     SortDirection,
 )
 from iam_mcp.catalog import ConceptDefinition, SemanticCatalog
+
+if TYPE_CHECKING:
+    from iam_agent.config import Settings
 
 OPERATOR_SQL = {
     FilterOperator.EQUALS: "=",

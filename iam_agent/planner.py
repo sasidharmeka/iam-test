@@ -12,9 +12,11 @@ from iam_agent.models import (
     AnalysisPlan,
     AnswerMode,
     ConversationTurn,
+    CatalogRetrieval,
     IAMDomain,
     QuestionDecomposition,
 )
+from iam_agent.errors import ModelOutputError
 
 OutputModel = TypeVar("OutputModel", bound=BaseModel)
 
@@ -39,13 +41,16 @@ class QuestionPlanner:
         question: str,
         history: list[ConversationTurn],
         domain_summaries: dict[str, dict],
+        retrieval: CatalogRetrieval | None = None,
     ) -> QuestionDecomposition:
         payload = {
             "question": question,
             "conversation_history": [turn.model_dump(mode="json") for turn in history],
             "available_domains": domain_summaries,
+            "retrieved_candidates": retrieval.model_dump(mode="json") if retrieval else None,
         }
-        decomposition = await self.model.generate_structured(
+        try:
+            decomposition = await self.model.generate_structured(
             system_instruction=(
                 "You are the planning layer of a read-only IAM analytics assistant. Resolve "
                 "follow-up references using only the supplied conversation history. Classify a "
@@ -63,8 +68,28 @@ class QuestionPlanner:
                 + json.dumps(payload, default=str, sort_keys=True)
             ),
             response_model=QuestionDecomposition,
-        )
-        return self._normalize_decomposition(decomposition, domain_summaries, question)
+            )
+        except ModelOutputError:
+            if not retrieval or not retrieval.requires_project_data:
+                raise
+            decomposition = QuestionDecomposition(
+                answer_mode=AnswerMode.DATA, clarified_question=question,
+                domains=retrieval.candidate_domains, entities=retrieval.entities,
+                requires_project_data=True,
+            )
+        decomposition = self._normalize_decomposition(decomposition, domain_summaries, question)
+        if retrieval:
+            # Domain selection is advisory. Retrieval candidates survive even a wrong nonempty
+            # domain choice, and a known project-data question cannot be downgraded to general.
+            decomposition.requires_project_data |= retrieval.requires_project_data
+            if decomposition.requires_project_data:
+                decomposition.domains = list(dict.fromkeys(
+                    retrieval.candidate_domains + decomposition.domains
+                ))
+                decomposition.entities = retrieval.entities or decomposition.entities
+                if decomposition.answer_mode == AnswerMode.GENERAL:
+                    decomposition.answer_mode = AnswerMode.MIXED
+        return decomposition
 
     @staticmethod
     def _normalize_decomposition(
@@ -144,7 +169,10 @@ class QuestionPlanner:
                 "inventing joins. Record operations use fields and no metrics. Aggregate, rank, "
                 "and trend operations use metrics; trend includes event_date as a dimension. "
                 "Use filters "
-                "for explicitly stated identities or constraints. Never output SQL, table names, "
+                "for explicitly stated identities or constraints. Satisfy EVERY evidence requirement "
+                "in semantic_catalog.evidence_requirements, including required record fields. "
+                "Domain labels do not override the retrieved concepts or these requirements. "
+                "Never output SQL, table names, "
                 "write operations, credentials, or concepts absent from the catalog."
             ),
             prompt=(
@@ -161,7 +189,7 @@ class QuestionPlanner:
         decomposition: QuestionDecomposition,
         history: list[ConversationTurn],
         catalog_context: dict,
-        rejected_plan: AnalysisPlan,
+        rejected_plan: AnalysisPlan | None,
         rejection_reason: str,
         maximum_steps: int,
         maximum_rows: int,
@@ -172,7 +200,7 @@ class QuestionPlanner:
             "decomposition": decomposition.model_dump(mode="json"),
             "conversation_history": [turn.model_dump(mode="json") for turn in history],
             "semantic_catalog": catalog_context,
-            "rejected_plan": rejected_plan.model_dump(mode="json"),
+            "rejected_plan": rejected_plan.model_dump(mode="json") if rejected_plan else None,
             "validator_rejection": rejection_reason,
             "limits": {
                 "maximum_steps": maximum_steps,
@@ -187,6 +215,9 @@ class QuestionPlanner:
                 "but replace unsupported concepts, fields, metrics, filters, sorts, or limits with "
                 "approved alternatives from the supplied semantic catalog. If evidence requires "
                 "multiple concepts, use independent steps and never invent joins. Return only an "
+                "AnalysisPlan that satisfies every semantic_catalog.evidence_requirements entry, "
+                "including identity filters and required record fields. A previous domain choice "
+                "must not exclude evidence from the expanded catalog. Return only an "
                 "AnalysisPlan; never return SQL, physical tables, write operations, or credentials."
             ),
             prompt=(

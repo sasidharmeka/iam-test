@@ -182,6 +182,24 @@ class QueryStepResult(BaseModel):
     truncated: bool = False
 
 
+class EvidenceRequirement(BaseModel):
+    topic: str
+    concepts: list[str]
+    required_fields: list[str] = Field(default_factory=list)
+
+
+class CatalogRetrieval(BaseModel):
+    catalog_version: int
+    candidate_concepts: list[str]
+    candidate_domains: list[IAMDomain]
+    requirements: list[EvidenceRequirement] = Field(default_factory=list)
+    entities: list[str] = Field(default_factory=list)
+    requires_project_data: bool = False
+    low_confidence: bool = False
+    reasons: list[str] = Field(default_factory=list)
+    catalog_context: dict[str, Any]
+
+
 class EvidenceBundle(BaseModel):
     objective: str
     results: list[QueryStepResult]

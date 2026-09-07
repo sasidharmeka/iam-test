@@ -1,4 +1,73 @@
-version: 1
+version: 2
+
+# Routing metadata is searched before Gemini chooses domains. A matched topic creates a
+# coverage requirement: at least one listed concept must occur in the final validated plan.
+# These are evidence categories, not a library of hard-coded SQL questions.
+routing_topics:
+  authentication:
+    description: Authentication evidence
+    aliases: [authentication, login, logins, sign in, sign ins, signin]
+    concepts: [impossible_login_anomalies, mfa_bypass_events, mfa_bypass_events_all_apps, impossible_travel_events, mfa_drift]
+  mfa:
+    description: Multi-factor authentication evidence
+    aliases: [mfa, multi factor, multifactor, two factor, 2fa]
+    concepts: [mfa_bypass_events, mfa_bypass_events_all_apps, mfa_drift]
+  mfa_bypass:
+    description: Application access following failed MFA
+    aliases: [mfa bypass, bypassed mfa, failed mfa, mfa failure]
+    concepts: [mfa_bypass_events, mfa_bypass_events_all_apps]
+  travel:
+    description: Implausible travel between logins
+    aliases: [impossible travel, travel, geographic, geography]
+    concepts: [impossible_travel_events]
+  risk:
+    description: Synthesized identity risk scores and contributing factors
+    aliases: [risk, risky, riskiest, high risk, risk score, risk ranking]
+    concepts: [risk_scores]
+  timeline:
+    description: Chronological identity activity
+    aliases: [timeline, timelines, user history, identity history, activity history]
+    concepts: [identity_timelines]
+  privilege:
+    description: Privilege grants lacking approved requests
+    aliases: [privilege escalation, escalated privilege, unrequested privilege]
+    concepts: [privilege_escalation_without_request, shadow_access_events]
+  provisioning:
+    description: Access and provisioning findings
+    aliases: [provisioning, access provisioning, access grant]
+    concepts: [privilege_escalation_without_request, rejected_but_executed, role_drift, stale_access, shadow_access_events]
+  role_drift:
+    description: Role changes over time
+    aliases: [role drift, role change, permission drift, entitlement drift]
+    concepts: [role_drift]
+  stale_access:
+    description: Unused access
+    aliases: [stale access, unused access, dormant access, inactive permission]
+    concepts: [stale_access]
+  shadow_access:
+    description: Ungoverned privileged access
+    aliases: [shadow access, unmanaged privilege, access outside saviynt]
+    concepts: [shadow_access_events]
+  data_transfer:
+    description: Unusual data transfer
+    aliases: [data transfer, transferred, exfiltration, download, data volume]
+    concepts: [excessive_data_transferred]
+  app_session:
+    description: Cross-application sessions and sequences
+    aliases: [multi app, application session, app session, application sequence]
+    concepts: [multi_app_single_session, high_risk_sequence]
+  approval:
+    description: Approval and execution inconsistencies
+    aliases: [approval, approver, rejected request, rubber stamping]
+    concepts: [suspicious_approver_behavior, rejected_but_executed, suspicious_time_warp]
+  group_churn:
+    description: Repeated group membership changes
+    aliases: [group churn, group membership, group changes, group additions]
+    concepts: [ad_group_churn_rate]
+  orphan:
+    description: Missing source coverage for identities or events
+    aliases: [orphan, orphaned, missing hr, without hr, missing worker]
+    concepts: [orphan_user_detection, orphan_event_detection]
 
 domains:
   identity_risk:

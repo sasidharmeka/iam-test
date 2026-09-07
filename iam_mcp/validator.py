@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from iam_agent.authorization import AuthorizationService, IdentityDirectory, normalize_scope
-from iam_agent.config import Settings
 from iam_agent.models import (
     AnalysisPlan,
     FilterOperator,
@@ -14,6 +13,9 @@ from iam_agent.models import (
     QueryStep,
 )
 from iam_mcp.catalog import ConceptDefinition, SemanticCatalog
+
+if TYPE_CHECKING:
+    from iam_agent.config import Settings
 
 
 class QueryPlanError(ValueError):

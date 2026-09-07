@@ -14,5 +14,10 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements-dev.txt
-      - run: ruff check iam_agent tests main.py
+      - name: Show suggested formatting for candidate review
+        run: |
+          ruff check --fix --diff iam_agent iam_mcp tests main.py || true
+          ruff format --diff iam_agent iam_mcp tests main.py || true
+      - run: ruff check iam_agent iam_mcp tests main.py
       - run: python -m pytest -q
+        if: ${{ !cancelled() }}

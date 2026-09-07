@@ -6,7 +6,8 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
 from iam_agent.authorization import AuthorizationError
-from iam_agent.models import AnalysisPlan, EvidenceBundle
+from iam_agent.errors import DependencyError
+from iam_agent.models import AnalysisPlan, CatalogRetrieval, ConversationTurn, EvidenceBundle
 from iam_mcp.catalog import CatalogError
 from iam_mcp.service import IAMEvidenceService
 from iam_mcp.validator import QueryPlanError
@@ -28,6 +29,7 @@ class QueryToolResponse(BaseModel):
     ok: bool
     evidence: EvidenceBundle | None = None
     error: str | None = None
+    error_code: str | None = None
 
 
 def create_mcp_server(service: IAMEvidenceService) -> MCPServer:
@@ -38,7 +40,7 @@ def create_mcp_server(service: IAMEvidenceService) -> MCPServer:
             "All tools are read-only. Discover domains and concepts before submitting a "
             "semantic AnalysisPlan. Never submit SQL or physical table identifiers."
         ),
-        version="1.0.0",
+        version="2.0.0",
     )
 
     @server.tool(
@@ -61,6 +63,20 @@ def create_mcp_server(service: IAMEvidenceService) -> MCPServer:
         return DomainDescriptionResponse.model_validate(service.describe_domains(domains))
 
     @server.tool(
+        name="search_iam_catalog",
+        description=(
+            "Search all IAM catalog concepts before selecting domains. Return multiple candidates, "
+            "their semantic schemas, and deterministic evidence-coverage requirements. Metadata "
+            "only; no BigQuery rows are scanned."
+        ),
+        structured_output=True,
+    )
+    def search_iam_catalog(
+        principal: str, question: str, history: list[ConversationTurn]
+    ) -> CatalogRetrieval:
+        return service.search_catalog(principal=principal, question=question, history=history)
+
+    @server.tool(
         name="run_iam_query",
         description=(
             "Validate and execute a bounded semantic AnalysisPlan against allowlisted IAM "
@@ -68,13 +84,19 @@ def create_mcp_server(service: IAMEvidenceService) -> MCPServer:
         ),
         structured_output=True,
     )
-    async def run_iam_query(principal: str, plan: AnalysisPlan) -> QueryToolResponse:
+    async def run_iam_query(
+        principal: str, plan: AnalysisPlan, question: str, history: list[ConversationTurn]
+    ) -> QueryToolResponse:
         try:
-            evidence = await service.run_query(principal=principal, plan=plan)
+            evidence = await service.run_query(
+                principal=principal, plan=plan, question=question, history=history
+            )
+        except DependencyError as exc:
+            return QueryToolResponse(ok=False, error=str(exc), error_code=exc.code)
         except (AuthorizationError, CatalogError, QueryPlanError, ValueError) as exc:
             # Expected plan rejections are data, not an MCP transport failure. This gives the
             # orchestrator a precise reason it can use for one bounded repair attempt.
-            return QueryToolResponse(ok=False, error=str(exc))
+            return QueryToolResponse(ok=False, error=str(exc), error_code="plan_rejected")
         return QueryToolResponse(ok=True, evidence=evidence)
 
     return server

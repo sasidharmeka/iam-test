@@ -20,6 +20,12 @@ class DomainDefinition(BaseModel):
     synonyms: list[str] = Field(default_factory=list)
 
 
+class RoutingTopic(BaseModel):
+    description: str
+    aliases: list[str]
+    concepts: list[str]
+
+
 class FieldDefinition(BaseModel):
     type: str
     description: str
@@ -67,6 +73,7 @@ class CatalogPayload(BaseModel):
     virtual_dimensions: dict[str, FieldDefinition]
     common_fields: dict[str, FieldDefinition]
     concepts: dict[str, ConceptDefinition]
+    routing_topics: dict[str, RoutingTopic] = Field(default_factory=dict)
 
 
 class SemanticCatalog:
@@ -78,7 +85,11 @@ class SemanticCatalog:
         self.virtual_dimensions = payload.virtual_dimensions
         self.common_fields = payload.common_fields
         self.concepts = payload.concepts
+        self.routing_topics = payload.routing_topics
         self._validate_physical_identifiers()
+        for topic in self.routing_topics.values():
+            if not topic.concepts or set(topic.concepts) - set(self.concepts):
+                raise CatalogError("Routing topics must reference existing catalog concepts")
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> SemanticCatalog:
@@ -132,11 +143,15 @@ class SemanticCatalog:
         except KeyError as exc:
             raise CatalogError(f"Unknown IAM concept: {name}") from exc
 
-    def planner_context(self, domains: list[IAMDomain]) -> dict:
+    def planner_context(
+        self, domains: list[IAMDomain], *, concept_names: list[str] | None = None
+    ) -> dict:
         selected_domains = set(domains)
         concepts: list[dict] = []
         for name, definition in self.concepts.items():
-            if not selected_domains.intersection(definition.domains):
+            if concept_names is not None and name not in concept_names:
+                continue
+            if concept_names is None and not selected_domains.intersection(definition.domains):
                 continue
             concepts.append(
                 {
@@ -145,6 +160,12 @@ class SemanticCatalog:
                     "grain": definition.grain,
                     "entity": definition.entity,
                     "domains": [domain.value for domain in definition.domains],
+                    "field_types": {
+                        field_name: field.type for field_name, field in definition.fields.items()
+                    },
+                    "user_field": definition.user_field,
+                    "time_field": definition.time_field,
+                    "default_fields": definition.default_fields,
                     "selectable_fields": {
                         field_name: field.description
                         for field_name, field in definition.fields.items()

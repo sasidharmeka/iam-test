@@ -8,11 +8,15 @@ from typing import Any
 from mcp.client import Client
 from mcp.server.mcpserver import MCPServer
 
-from iam_agent.models import AnalysisPlan, EvidenceBundle, IAMDomain
+from iam_agent.errors import DependencyError
+from iam_agent.models import (
+    AnalysisPlan, CatalogRetrieval, ConversationTurn, EvidenceBundle, IAMDomain,
+)
 
 
-class MCPToolError(RuntimeError):
-    pass
+class MCPToolError(DependencyError):
+    def __init__(self, message: str, *, code: str = "plan_rejected"):
+        super().__init__(code, message)
 
 
 class IAMEvidenceMCPClient:
@@ -36,7 +40,7 @@ class IAMEvidenceMCPClient:
         self._domain_cache = {
             str(name): dict(card) for name, card in payload.get("domains", {}).items()
         }
-        required = {"list_iam_domains", "describe_iam_domains", "run_iam_query"}
+        required = {"list_iam_domains", "describe_iam_domains", "search_iam_catalog", "run_iam_query"}
         if not required.issubset(self._tool_names):
             missing = ", ".join(sorted(required - set(self._tool_names)))
             raise MCPToolError(f"IAM MCP server is missing required tools: {missing}")
@@ -53,20 +57,43 @@ class IAMEvidenceMCPClient:
         )
         return self._payload(result)
 
-    async def run_query(self, principal: str, plan: AnalysisPlan) -> EvidenceBundle:
+    async def search_catalog(
+        self, principal: str, question: str, history: list[ConversationTurn]
+    ) -> CatalogRetrieval:
+        result = await self._call(
+            "search_iam_catalog",
+            {"principal": principal, "question": question,
+             "history": [turn.model_dump(mode="json") for turn in history]},
+        )
+        return CatalogRetrieval.model_validate(self._payload(result))
+
+    async def run_query(
+        self, principal: str, plan: AnalysisPlan, *, question: str,
+        history: list[ConversationTurn] | None = None,
+    ) -> EvidenceBundle:
         result = await self._call(
             "run_iam_query",
-            {"principal": principal, "plan": plan.model_dump(mode="json")},
+            {"principal": principal, "plan": plan.model_dump(mode="json"),
+             "question": question,
+             "history": [turn.model_dump(mode="json") for turn in (history or [])]},
         )
         payload = self._payload(result)
         if payload.get("ok") is False:
-            raise MCPToolError(str(payload.get("error") or "The query plan was rejected"))
+            raise MCPToolError(
+                str(payload.get("error") or "The query plan was rejected"),
+                code=payload.get("error_code") or "plan_rejected",
+            )
         evidence = payload.get("evidence", payload)
         return EvidenceBundle.model_validate(evidence)
 
     async def _call(self, name: str, arguments: dict[str, Any]):
-        async with Client(self._server, raise_exceptions=True) as client:
-            result = await client.call_tool(name, arguments)
+        try:
+            async with Client(self._server, raise_exceptions=True) as client:
+                result = await client.call_tool(name, arguments)
+        except Exception as exc:
+            raise MCPToolError(
+                "The IAM evidence service could not complete the tool call.", code="mcp_transport"
+            ) from exc
         if getattr(result, "is_error", False):
             messages = [getattr(item, "text", "") for item in result.content]
             raise MCPToolError(" ".join(message for message in messages if message))

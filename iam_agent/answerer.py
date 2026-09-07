@@ -85,4 +85,6 @@ class AnswerAgent:
         answer.sources = [source for source in answer.sources if source in allowed_sources]
         if not answer.sources:
             answer.sources = evidence.queried_tables
+        # Missing steps are visible even if the LLM forgets to mention partial evidence.
+        answer.caveats = list(dict.fromkeys(evidence.warnings + answer.caveats))[:8]
         return answer

@@ -67,6 +67,7 @@ async def test_official_mcp_client_discovers_and_calls_read_only_tools() -> None
     assert client.tool_names == (
         "list_iam_domains",
         "describe_iam_domains",
+        "search_iam_catalog",
         "run_iam_query",
     )
     domains = await client.domain_summaries()
@@ -91,7 +92,7 @@ async def test_official_mcp_client_discovers_and_calls_read_only_tools() -> None
             )
         ],
     )
-    evidence = await client.run_query("analyst@example.com", plan)
+    evidence = await client.run_query("analyst@example.com", plan, question="Rank users")
 
     assert evidence.queried_tables == ["risk_scores"]
     assert evidence.results[0].rows[0]["user"] == "user12"
@@ -113,4 +114,4 @@ async def test_mcp_boundary_rejects_a_concept_absent_from_the_catalog() -> None:
     )
 
     with pytest.raises(MCPToolError, match="Unknown IAM concept"):
-        await client.run_query("analyst@example.com", plan)
+        await client.run_query("analyst@example.com", plan, question="Show employee salary")

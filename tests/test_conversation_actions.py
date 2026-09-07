@@ -20,6 +20,7 @@ from iam_agent.models import (
 )
 from iam_agent.reporting import ReportService, ReportStore
 from iam_agent.result_store import ResultStore
+
 OWNER, KEY = "analyst@example.com", "one"
 
 

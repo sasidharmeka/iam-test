@@ -245,7 +245,7 @@ That is the complete variable list. In particular, do not create `DATABASE_SECRE
 `CLOUD_SQL_INSTANCE`, `DATABASE_URL`, `CHAT_APPROVER_PRINCIPALS`, or
 `WEB_APPROVER_PRINCIPALS`.
 
-CSV, Excel, PDF, and Word downloads require no additional GitHub or Cloud Run variables. They
+CSV, Excel, PDF, Word, and PowerPoint downloads require no additional GitHub or Cloud Run variables. They
 are generated from the already-returned evidence and held briefly in application memory.
 
 The workflow itself sets `ENABLE_WEB_UI=true`, discovers the final Chat audience URL, and enables
@@ -342,7 +342,7 @@ Compare MFA bypasses by application in a Word document.
 
 The first question can be answered generally. The other questions cause MCP catalog discovery,
 a typed Gemini plan, deterministic SQL compilation, a BigQuery dry run, a bounded query, and a
-grounded response. An explicit CSV, Excel/XLSX, PDF, or Word/DOCX request adds download buttons
+grounded response. An explicit CSV, Excel/XLSX, PDF, Word/DOCX, or PowerPoint/PPTX request adds download buttons
 below the answer. Download the files within 15 minutes; a Cloud Run instance restart also clears
 them. The endpoint re-verifies the signed-in Google account and never returns another user's
 report.
@@ -419,7 +419,7 @@ if [[ -n "${SERVICE_URL}" ]]; then
 fi
 ```
 
-A healthy response includes `"mode":"read-only"`, `"version":"3.3.0"`, the revision, and the four
+A healthy response includes `"mode":"read-only"`, `"version":"3.4.0"`, the revision, and the four
 MCP tool names.
 
 View recent application logs with:

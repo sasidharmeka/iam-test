@@ -65,7 +65,7 @@ Gemini's semantic plan format.
 | --- | --- |
 | Conversation action resolver | Uses message history and saved result/file manifests to distinguish analysis, export, explanation, and email drafts before domain routing |
 | Saved result store | Keeps exact evidence and report IDs scoped to the signed-in user and conversation |
-| Catalog retriever | Searches all concepts before Gemini; combines topic aliases, descriptions, fields, and typo-tolerant matches; retains multiple candidates |
+| Catalog retriever | Searches all concepts before semantic query planning; combines topic aliases, descriptions, fields, and typo-tolerant matches; retains multiple candidates |
 | Gemini question planner | Resolves follow-ups and classifies general/data/mixed questions using already-retrieved schemas; domain labels do not gate data access |
 | MCP catalog tools | Expose approved domain, concept, field, dimension, metric, and grain descriptions |
 | Gemini query planner | Produces `AnalysisPlan` JSON using catalog vocabulary only |

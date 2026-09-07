@@ -81,7 +81,10 @@ def test_requested_report_formats_are_deterministic_and_deduplicated() -> None:
         ReportFormat.WORD,
     ]
     assert requested_report_formats("Explain the word risk") == []
-    assert requested_report_formats("Export as csv, exel, pfd and workd") == list(ReportFormat)
+    assert requested_report_formats("Export as csv, exel, pfd and workd") == [
+        ReportFormat.CSV, ReportFormat.EXCEL, ReportFormat.PDF, ReportFormat.WORD,
+    ]
+    assert requested_report_formats("Prepare a PowerPoint") == [ReportFormat.POWERPOINT]
     assert requested_report_formats("Give me all report formats") == list(ReportFormat)
 
 
@@ -95,7 +98,7 @@ def test_all_report_formats_are_valid_files_and_excel_cells_are_safe() -> None:
 
     excel_content = exporter.export(result, ReportFormat.EXCEL)
     workbook = load_workbook(io.BytesIO(excel_content))
-    assert workbook.sheetnames == ["Summary", "risk_scores"]
+    assert workbook.sheetnames == ["Summary", "Query scope", "risk_scores"]
     evidence_values = [cell.value for row in workbook["risk_scores"].iter_rows() for cell in row]
     assert '\'=HYPERLINK("https://example.invalid")' in evidence_values
 
@@ -105,6 +108,16 @@ def test_all_report_formats_are_valid_files_and_excel_cells_are_safe() -> None:
     word_content = exporter.export(result, ReportFormat.WORD)
     document = Document(io.BytesIO(word_content))
     assert document.paragraphs[0].text == "IAM Analytics Report"
+
+    from pptx import Presentation
+
+    deck = Presentation(io.BytesIO(exporter.export(result, ReportFormat.POWERPOINT)))
+    assert len(deck.slides) >= 5
+    chart = next(
+        shape.chart for slide in deck.slides for shape in slide.shapes if shape.has_chart
+    )
+    assert chart.series[0].values == (91.0,)
+    assert "user12" in [c.label for c in chart.plots[0].categories]
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -42,6 +42,33 @@ class ReportFormat(StrEnum):
     EXCEL = "xlsx"
     PDF = "pdf"
     WORD = "docx"
+    POWERPOINT = "pptx"
+
+
+class ConversationAction(BaseModel):
+    action: Literal["analyze", "export", "email", "explain", "clarify"]
+    source_result_id: str = ""
+    resolved_question: str = ""
+    formats: list[ReportFormat] = Field(default_factory=list)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=8)
+    recipient: str = ""
+    clarification: str = ""
+
+
+class ReportSection(BaseModel):
+    heading: str = Field(max_length=100)
+    body: str = Field(max_length=5000)
+
+
+class ReportDocument(BaseModel):
+    title: str = Field(max_length=140)
+    executive_summary: str = Field(max_length=4000)
+    sections: list[ReportSection] = Field(default_factory=list, max_length=12)
+
+
+class EmailContent(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=12000)
 
 
 class QueryOperation(StrEnum):
@@ -240,3 +267,6 @@ class ChatWorkflowResult(BaseModel):
     plan: AnalysisPlan | None = None
     evidence: EvidenceBundle | None = None
     reports: list[ReportDescriptor] = Field(default_factory=list)
+    result_id: str = ""
+    report_document: ReportDocument | None = None
+    email_draft: dict[str, Any] | None = None

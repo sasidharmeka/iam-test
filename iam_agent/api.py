@@ -12,8 +12,9 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from iam_agent.actions import ActionResolver, ReportAuthor
 from iam_agent.answerer import AnswerAgent
 from iam_agent.authentication import (
     ChatAuthenticationError,
@@ -21,16 +22,19 @@ from iam_agent.authentication import (
     GoogleWebIdentityVerifier,
     WebAuthenticationError,
 )
-from iam_agent.authorization import AuthorizationService, IdentityDirectory
+from iam_agent.authorization import AuthorizationError, AuthorizationService, IdentityDirectory
 from iam_agent.chat import GoogleChatHandler
 from iam_agent.config import Settings, get_settings
 from iam_agent.conversation import ConversationStore
+from iam_agent.conversation_actions import ConversationActions
+from iam_agent.email_service import EmailError, EmailService
 from iam_agent.gemini import GeminiClient
 from iam_agent.mcp_client import IAMEvidenceMCPClient
 from iam_agent.orchestrator import IAMOrchestrator
 from iam_agent.planner import QuestionPlanner
 from iam_agent.policy_rag import PolicyStore
 from iam_agent.reporting import ReportService, ReportStore
+from iam_agent.result_store import ResultStore
 from iam_mcp.bigquery_executor import BigQueryExecutor
 from iam_mcp.catalog import SemanticCatalog
 from iam_mcp.compiler import QueryCompiler
@@ -48,10 +52,29 @@ class Container:
     mcp_client: IAMEvidenceMCPClient
     chat: GoogleChatHandler
     report_store: ReportStore
+    email_service: EmailService | None = None
+    authorization: AuthorizationService | None = None
 
 
 class WebMessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
+    conversation_id: str = Field(default="main", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    source_result_id: str = Field(default="", max_length=64)
+
+
+class EmailPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recipient: str = Field(max_length=254)
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=12000)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=8)
+
+
+class EmailSendRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    review_token: str = Field(min_length=1, max_length=128)
+    confirmed: bool
+    access_token: SecretStr = Field(min_length=1, max_length=8192)
 
 
 WEB_UI_PATH = Path(__file__).with_name("web_ui.html")
@@ -89,6 +112,16 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     mcp_client = IAMEvidenceMCPClient(create_mcp_server(evidence_service))
     report_store = ReportStore()
+    report_service = ReportService(report_store)
+    email_service = EmailService(report_store)
+    conversations = ConversationStore(
+        max_sessions=settings.conversation_max_sessions,
+        max_turns=settings.conversation_max_turns,
+    )
+    actions = ConversationActions(
+        resolver=ActionResolver(gemini), author=ReportAuthor(gemini), results=ResultStore(),
+        reports=report_service, emails=email_service, conversations=conversations,
+    )
     orchestrator = IAMOrchestrator(
         settings=settings,
         authorization=authorization,
@@ -96,11 +129,9 @@ def build_container(settings: Settings | None = None) -> Container:
         mcp_client=mcp_client,
         planner=QuestionPlanner(gemini),
         answerer=AnswerAgent(gemini),
-        conversations=ConversationStore(
-            max_sessions=settings.conversation_max_sessions,
-            max_turns=settings.conversation_max_turns,
-        ),
-        report_service=ReportService(report_store),
+        conversations=conversations,
+        report_service=report_service,
+        actions=actions,
     )
     return Container(
         settings=settings,
@@ -110,6 +141,8 @@ def build_container(settings: Settings | None = None) -> Container:
         mcp_client=mcp_client,
         chat=GoogleChatHandler(orchestrator),
         report_store=report_store,
+        email_service=email_service,
+        authorization=authorization,
     )
 
 
@@ -121,7 +154,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         yield
         await app.state.container.gemini.close()
 
-    app = FastAPI(title="Read-only IAM Analytics Agent", version="3.3.0", lifespan=lifespan)
+    app = FastAPI(title="Read-only IAM Analytics Agent", version="3.4.0", lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
@@ -129,7 +162,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         return {
             "status": "ok",
             "mode": "read-only",
-            "version": "3.3.0",
+            "version": "3.4.0",
             "revision": os.environ.get("K_REVISION", "local"),
             "mcp_tools": list(runtime.mcp_client.tool_names),
         }
@@ -169,10 +202,50 @@ def create_app(container: Container | None = None) -> FastAPI:
             "message": {
                 "text": request.text,
                 "name": f"web-messages/{uuid4()}",
+                "thread": {"name": request.conversation_id},
+                "source_result_id": request.source_result_id,
             },
             "space": {"name": "web-spaces/browser-demo"},
         }
         return await runtime.chat.handle(event, include_reports=True)
+
+    async def email_identity(authorization: str | None) -> tuple[Container, str]:
+        runtime: Container = app.state.container
+        identity = await asyncio.to_thread(web_identity, runtime, authorization)
+        if runtime.email_service is None or runtime.authorization is None:
+            raise HTTPException(status_code=503, detail="Email is not configured")
+        try:
+            runtime.authorization.require_query(identity["email"])
+        except AuthorizationError as exc:
+            raise HTTPException(status_code=403, detail="Not authorized for this app") from exc
+        return runtime, identity["email"]
+
+    @app.post("/web/email/{draft_id}/preview")
+    async def preview_email(
+        draft_id: str, request: EmailPreviewRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        runtime, owner = await email_identity(authorization)
+        try:
+            return await runtime.email_service.preview(
+                draft_id=draft_id, owner=owner, **request.model_dump(),
+            )
+        except EmailError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+    @app.post("/web/email/{draft_id}/send")
+    async def send_email(
+        draft_id: str, request: EmailSendRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        runtime, owner = await email_identity(authorization)
+        try:
+            return await runtime.email_service.send(
+                draft_id=draft_id, owner=owner, review_token=request.review_token,
+                confirmed=request.confirmed, access_token=request.access_token.get_secret_value(),
+            )
+        except EmailError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
     @app.get("/web/reports/{report_id}")
     async def download_report(

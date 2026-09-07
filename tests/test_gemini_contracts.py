@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from iam_agent.errors import DependencyError, ModelOutputError
 from iam_agent.gemini import GeminiClient
 from iam_agent.gemini_contracts import GeminiAnalysisPlan, GeminiDecomposition
-from iam_agent.models import AnalysisPlan
+from iam_agent.models import AnalysisPlan, ConversationAction, EmailContent, ReportDocument
 
 
 def wire_plan(value='"user12"'):
@@ -34,7 +34,9 @@ def wire_plan(value='"user12"'):
 
 
 def test_simple_wire_contract_passes_real_google_sdk_schema_conversion():
-    for contract in (GeminiAnalysisPlan, GeminiDecomposition):
+    for contract in (
+        GeminiAnalysisPlan, GeminiDecomposition, ConversationAction, ReportDocument, EmailContent,
+    ):
         schema = _transformers.t_schema(None, contract)
         assert schema.properties
     # Unlike the internal scalar/date/array union, filter generation has one simple string type.

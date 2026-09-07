@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from docx import Document
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
@@ -42,6 +42,9 @@ MIME_TYPES = {
     ReportFormat.EXCEL: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ReportFormat.PDF: "application/pdf",
     ReportFormat.WORD: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ReportFormat.POWERPOINT: (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    ),
 }
 
 FORMAT_PATTERNS = {
@@ -51,6 +54,9 @@ FORMAT_PATTERNS = {
     ReportFormat.WORD: re.compile(
         r"\b(?:docx|word\s+(?:file|document|report|formats?)|(?:as|in|to)\s+word)\b",
         re.IGNORECASE,
+    ),
+    ReportFormat.POWERPOINT: re.compile(
+        r"\b(?:pptx?|power\s?point|slides?|slide\s*deck|presentation)\b", re.IGNORECASE,
     ),
 }
 
@@ -107,6 +113,8 @@ class ReportStore:
         filename: str,
         content: bytes,
     ) -> ReportDescriptor:
+        if len(content) > 16_000_000:
+            raise ValueError("Report exceeds the 16 MB file limit; request fewer rows")
         report_id = uuid4().hex
         artifact = ReportArtifact(
             report_id=report_id,
@@ -122,7 +130,9 @@ class ReportStore:
                 artifact=artifact,
                 expires_at=time.monotonic() + self.ttl_seconds,
             )
-            while len(self._reports) > self.max_reports:
+            while len(self._reports) > self.max_reports or sum(
+                len(item.artifact.content) for item in self._reports.values()
+            ) > 64_000_000:
                 self._reports.popitem(last=False)
         return ReportDescriptor(
             report_id=report_id,
@@ -158,6 +168,10 @@ class ReportExporter:
             return self._pdf(result)
         if report_format == ReportFormat.WORD:
             return self._word(result)
+        if report_format == ReportFormat.POWERPOINT:
+            from iam_agent.slide_report import export_presentation
+
+            return export_presentation(result)
         raise ValueError(f"Unsupported report format: {report_format}")
 
     def filename(self, result: ChatWorkflowResult, report_format: ReportFormat) -> str:
@@ -189,6 +203,12 @@ class ReportExporter:
             ("Domains", ", ".join(domain.value for domain in result.decomposition.domains)),
             ("Sources", ", ".join(result.answer.sources)),
         ]
+        if result.report_document:
+            summary_rows.extend([
+                ("Report title", result.report_document.title),
+                ("Executive summary", result.report_document.executive_summary),
+                *((s.heading, s.body) for s in result.report_document.sections),
+            ])
         for row in result.answer.key_findings:
             summary_rows.append(("Key finding", row))
         for row in result.answer.caveats:
@@ -196,6 +216,26 @@ class ReportExporter:
         for row in summary_rows:
             summary.append([self._spreadsheet_value(value) for value in row])
         self._style_sheet(summary)
+        summary.column_dimensions["A"].width = 26
+        summary.column_dimensions["B"].width = 110
+        for row in summary:
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+            summary.row_dimensions[row[0].row].height = min(
+                400, max(30, (len(str(row[1].value or "")) // 100 + 1) * 16),
+            )
+
+        scope = workbook.create_sheet("Query scope")
+        scope.append(["Source", "Purpose", "Rows returned", "Filters", "Time window (days)"])
+        if result.evidence:
+            for item in result.evidence.results:
+                scope.append([self._spreadsheet_value(value) for value in (
+                    item.source_table, item.purpose, item.row_count,
+                    [f.model_dump(mode="json") for f in item.applied_filters],
+                    item.time_range_days if item.time_range_days is not None
+                    else "All retained history",
+                )])
+        self._style_sheet(scope, header=True)
 
         if result.evidence:
             for index, query_result in enumerate(result.evidence.results, start=1):
@@ -214,12 +254,20 @@ class ReportExporter:
 
     def _word(self, result: ChatWorkflowResult) -> bytes:
         document = Document()
-        document.add_heading("IAM Analytics Report", 0)
+        document.add_heading(
+            result.report_document.title if result.report_document else "IAM Analytics Report", 0,
+        )
         document.add_paragraph(f"Generated: {datetime.now(UTC).isoformat()}")
         document.add_heading("Question", level=1)
         document.add_paragraph(result.decomposition.clarified_question)
         document.add_heading("Analysis", level=1)
         document.add_paragraph(result.answer.answer)
+        if result.report_document:
+            document.add_heading("Executive summary", level=1)
+            document.add_paragraph(result.report_document.executive_summary)
+            for section in result.report_document.sections:
+                document.add_heading(section.heading, level=1)
+                document.add_paragraph(section.body)
         self._word_list(document, "Key findings", result.answer.key_findings)
         self._word_list(document, "Sources", result.answer.sources)
         self._word_list(document, "Caveats", result.answer.caveats)
@@ -236,16 +284,20 @@ class ReportExporter:
                     document.add_paragraph("No rows returned.")
                     continue
                 fields = self._fieldnames(query_result.rows)
-                table = document.add_table(rows=1, cols=len(fields))
-                table.style = "Table Grid"
-                for cell, field in zip(table.rows[0].cells, fields, strict=True):
-                    cell.text = field
-                    for run in cell.paragraphs[0].runs:
-                        run.bold = True
-                for row in query_result.rows:
-                    cells = table.add_row().cells
-                    for cell, field in zip(cells, fields, strict=True):
-                        cell.text = self._display_value(row.get(field, ""))
+                for start in range(0, len(fields), 4):
+                    group = fields[start:start + 4]
+                    table = document.add_table(rows=1, cols=len(group) + 1)
+                    table.style = "Light Shading Accent 1"
+                    for cell, field in zip(table.rows[0].cells, ["Row", *group], strict=True):
+                        cell.text = field
+                        for run in cell.paragraphs[0].runs:
+                            run.bold = True
+                    for index, row in enumerate(query_result.rows, 1):
+                        cells = table.add_row().cells
+                        cells[0].text = str(index)
+                        for cell, field in zip(cells[1:], group, strict=True):
+                            cell.text = self._display_value(row.get(field, ""))
+                    document.add_paragraph()
 
         output = io.BytesIO()
         document.save(output)
@@ -264,7 +316,9 @@ class ReportExporter:
             title="IAM Analytics Report",
         )
         story: list[Any] = [
-            Paragraph("IAM Analytics Report", styles["Title"]),
+            Paragraph(html.escape(
+                result.report_document.title if result.report_document else "IAM Analytics Report"
+            ), styles["Title"]),
             Paragraph(f"Generated: {datetime.now(UTC).isoformat()}", styles["Normal"]),
             Spacer(1, 8),
             Paragraph("Question", styles["Heading2"]),
@@ -272,6 +326,18 @@ class ReportExporter:
             Paragraph("Analysis", styles["Heading2"]),
             Paragraph(html.escape(result.answer.answer), styles["BodyText"]),
         ]
+        if result.report_document:
+            story.extend([
+                Paragraph("Executive summary", styles["Heading2"]),
+                Paragraph(
+                    html.escape(result.report_document.executive_summary), styles["BodyText"],
+                ),
+            ])
+            for section in result.report_document.sections:
+                story.append(Paragraph(html.escape(section.heading), styles["Heading2"]))
+                for paragraph in section.body.splitlines():
+                    if paragraph.strip():
+                        story.append(Paragraph(html.escape(paragraph), styles["BodyText"]))
         for heading, values in (
             ("Key findings", result.answer.key_findings),
             ("Sources", result.answer.sources),
@@ -305,19 +371,29 @@ class ReportExporter:
                     story.append(Paragraph("No rows returned.", styles["BodyText"]))
                     continue
                 fields = self._fieldnames(query_result.rows)
-                table_data = [fields]
-                table_data.extend(
-                    [self._pdf_cell(row.get(field, ""), styles["BodyText"]) for field in fields]
-                    for row in query_result.rows
-                )
-                page_width = landscape(letter)[0] - 0.7 * inch
-                table = LongTable(
-                    table_data,
-                    colWidths=[page_width / len(fields)] * len(fields),
-                    repeatRows=1,
-                )
-                table.setStyle(self._pdf_table_style())
-                story.append(table)
+                story.append(Paragraph(
+                    "All returned rows are included. Long cells are abbreviated; use Excel or CSV "
+                    "for complete cell values. Row numbers align column groups.", styles["BodyText"],
+                ))
+                for start in range(0, len(fields), 5):
+                    group = fields[start:start + 5]
+                    table_data = [["Row", *[
+                        self._pdf_cell(field, styles["BodyText"]) for field in group
+                    ]]]
+                    table_data.extend(
+                        [str(index), *[
+                            self._pdf_cell(row.get(field, ""), styles["BodyText"])
+                            for field in group
+                        ]] for index, row in enumerate(query_result.rows, 1)
+                    )
+                    page_width = landscape(letter)[0] - 0.7 * inch
+                    table = LongTable(
+                        table_data,
+                        colWidths=[25] + [(page_width - 25) / len(group)] * len(group),
+                        repeatRows=1,
+                    )
+                    table.setStyle(self._pdf_table_style())
+                    story.extend([Spacer(1, 8), table])
         document.build(story)
         return output.getvalue()
 
@@ -332,6 +408,15 @@ class ReportExporter:
             *({"_record_type": "source", "text": value} for value in result.answer.sources),
             *({"_record_type": "caveat", "text": value} for value in result.answer.caveats),
         ]
+        if result.report_document:
+            rows.extend([
+                {
+                    "_record_type": "executive_summary",
+                    "text": result.report_document.executive_summary,
+                },
+                *({"_record_type": "report_section", "_purpose": s.heading, "text": s.body}
+                  for s in result.report_document.sections),
+            ])
         if result.evidence:
             for query_result in result.evidence.results:
                 for evidence_row in query_result.rows:
@@ -433,6 +518,7 @@ class ReportService:
     def __init__(self, store: ReportStore, exporter: ReportExporter | None = None):
         self.store = store
         self.exporter = exporter or ReportExporter()
+        self._render_lock = asyncio.Lock()
 
     async def create_reports(
         self,
@@ -445,7 +531,8 @@ class ReportService:
         failures: list[str] = []
         for report_format in dict.fromkeys(formats):
             try:
-                content = await asyncio.to_thread(self.exporter.export, result, report_format)
+                async with self._render_lock:
+                    content = await asyncio.to_thread(self.exporter.export, result, report_format)
                 filename = self.exporter.filename(result, report_format)
                 descriptors.append(
                     await self.store.add(

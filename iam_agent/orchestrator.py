@@ -8,6 +8,7 @@ from iam_agent.answerer import AnswerAgent
 from iam_agent.authorization import AuthorizationError, AuthorizationService
 from iam_agent.config import Settings
 from iam_agent.conversation import ConversationStore
+from iam_agent.conversation_actions import ConversationActions
 from iam_agent.errors import DependencyError, ModelOutputError, WorkflowError
 from iam_agent.mcp_client import IAMEvidenceMCPClient, MCPToolError
 from iam_agent.models import (
@@ -38,6 +39,7 @@ class IAMOrchestrator:
         answerer: AnswerAgent,
         conversations: ConversationStore,
         report_service: ReportService | None = None,
+        actions: ConversationActions | None = None,
     ):
         self.settings = settings
         self.authorization = authorization
@@ -47,6 +49,7 @@ class IAMOrchestrator:
         self.answerer = answerer
         self.conversations = conversations
         self.report_service = report_service
+        self.actions = actions
 
     async def answer(
         self,
@@ -55,11 +58,23 @@ class IAMOrchestrator:
         question: str,
         conversation_key: str,
         report_formats: list[ReportFormat] | None = None,
+        source_result_id: str = "",
+        allow_actions: bool = False,
     ) -> ChatWorkflowResult:
         stage = "authorization"
         try:
             self.authorization.require_query(actor.principal)
             history = await self.conversations.get(conversation_key)
+            original_question = question
+            if allow_actions and self.actions:
+                stage = "conversation_action"
+                question, report_formats, response = await self.actions.prepare(
+                    owner=actor.principal, key=conversation_key, question=question,
+                    history=history, formats=report_formats or [],
+                    source_result_id=source_result_id,
+                )
+                if response is not None:
+                    return response
             stage = "catalog_retrieval"
             # The raw question reaches deterministic catalog retrieval BEFORE any Gemini call.
             retrieval = await self.mcp_client.search_catalog(actor.principal, question, history)
@@ -149,7 +164,7 @@ class IAMOrchestrator:
             await self.conversations.append(
                 conversation_key,
                 ConversationTurn(
-                    user_message=question,
+                    user_message=original_question,
                     assistant_summary=answer.answer,
                     entities=decomposition.entities,
                     domains=decomposition.domains,
@@ -162,7 +177,16 @@ class IAMOrchestrator:
                 answer=answer,
             )
             stage = "report_generation"
-            if report_formats and self.report_service:
+            if allow_actions and self.actions:
+                if report_formats:
+                    _, failures = await self.actions.render(
+                        actor.principal, conversation_key, result, report_formats, original_question,
+                    )
+                    if failures:
+                        result.answer.caveats.append("Unavailable formats: " + ", ".join(failures))
+                else:
+                    await self.actions.results.save(actor.principal, conversation_key, result)
+            elif report_formats and self.report_service:
                 result.reports, failures = await self.report_service.create_reports(
                     owner=actor.principal,
                     result=result,

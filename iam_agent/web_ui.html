@@ -21,7 +21,7 @@
 
       * { box-sizing: border-box; }
       body { margin: 0; background: var(--canvas); color: var(--ink); }
-      button, input { font: inherit; }
+      button, input, textarea { font: inherit; }
       button { cursor: pointer; }
 
       .shell {
@@ -123,6 +123,20 @@
       .download { border: 1px solid #b9c8e4; border-radius: 9px; padding: 8px 11px; color: var(--brand-dark); background: #edf2fa; font-weight: 700; }
       .download:hover { border-color: var(--brand); background: #e1e9f8; }
       .download:disabled { cursor: wait; opacity: .55; }
+      .suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; white-space: normal; }
+      .suggestion { text-align: left; border: 1px solid #b9c8e4; border-radius: 18px; padding: 8px 12px; color: var(--brand-dark); background: white; }
+      .suggestion:hover { background: #edf2fa; border-color: var(--brand); }
+      button:disabled { opacity: .55; cursor: not-allowed; }
+      .mail-panel { white-space: normal; margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+      .mail-panel h3 { margin: 0 0 14px; }
+      .mail-panel label { display: block; font-size: 14px; font-weight: 600; margin: 12px 0; }
+      .mail-panel input:not([type=checkbox]), .mail-panel textarea { display: block; width: 100%; margin-top: 5px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+      .mail-panel textarea { resize: vertical; min-height: 220px; line-height: 1.5; }
+      .mail-panel input[type=checkbox] { margin-right: 8px; }
+      .mail-body { white-space: pre-wrap; padding: 14px; background: #f3f6fa; border-radius: 10px; }
+      .mail-status { color: var(--muted); font-size: 14px; }
+      .mail-status.error { color: var(--danger); }
+      .mail-actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
       .composer { border-radius: 16px; padding: 12px; display: flex; gap: 10px; }
       .composer input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
       .composer input:focus { outline: 3px solid rgba(39, 88, 215, .15); border-color: var(--brand); }
@@ -142,7 +156,7 @@
       <aside>
         <div class="mark">IAM</div>
         <h1>IAM Analytics Agent</h1>
-        <p>Ask natural-language questions across 22 governed BigQuery IAM analytics outputs. This agent is read-only.</p>
+        <p>Explore IAM evidence, prepare reports, and share them by email after reviewing the draft. IAM data stays read-only.</p>
         <div class="identity">
           <strong>Signed-in identity</strong>
           <span id="identity">Not signed in</span>
@@ -153,7 +167,7 @@
         <header>
           <div>
             <h2>Conversational analytics</h2>
-            <p>Google-authenticated, MCP-governed, and read-only</p>
+            <p>Read-only IAM analysis · Reports and reviewed email</p>
           </div>
           <div id="signin"></div>
           <button id="signout" class="button secondary" type="button">Sign out</button>
@@ -176,6 +190,14 @@
     <script>
       const clientId = "__GOOGLE_CLIENT_ID__";
       let credential = "";
+      let busy = false;
+      let gmailBusy = false;
+      const gmailScope = "https://www.googleapis.com/auth/gmail.send";
+      let conversationId = sessionStorage.getItem("iam-conversation-id");
+      if (!conversationId) {
+        conversationId = crypto.randomUUID();
+        sessionStorage.setItem("iam-conversation-id", conversationId);
+      }
 
       const messages = document.getElementById("messages");
       const empty = document.getElementById("empty");
@@ -274,7 +296,7 @@
 
       function addReportButtons(message, reports) {
         if (!reports?.length) return;
-        const labels = { csv: "CSV", xlsx: "Excel", pdf: "PDF", docx: "Word" };
+        const labels = { csv: "CSV", xlsx: "Excel", pdf: "PDF", docx: "Word", pptx: "PowerPoint" };
         const downloads = document.createElement("div");
         downloads.className = "downloads";
         for (const report of reports) {
@@ -289,25 +311,197 @@
         messages.scrollTop = messages.scrollHeight;
       }
 
-      async function sendMessage(text) {
+      function setBusy(value) {
+        busy = value;
+        promptInput.disabled = value || !credential;
+        sendButton.disabled = value || !credential;
+        document.querySelectorAll(".suggestion").forEach(button => {
+          button.disabled = value || !credential;
+        });
+      }
+
+      function addSuggestions(message, questions, resultId) {
+        if (!Array.isArray(questions)) return;
+        const choices = document.createElement("div");
+        choices.className = "suggestions";
+        for (const question of questions.slice(0, 4)) {
+          if (typeof question !== "string" || !question.trim() || question.length > 2000) continue;
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "suggestion";
+          button.textContent = question;
+          button.addEventListener("click", () => sendMessage(question, resultId));
+          choices.appendChild(button);
+        }
+        message.appendChild(choices);
+      }
+
+      function element(tag, text, className) {
+        const node = document.createElement(tag);
+        if (text) node.textContent = text;
+        if (className) node.className = className;
+        return node;
+      }
+
+      function renderEmailDraft(message, draft) {
+        const panel = element("form", "", "mail-panel");
+        panel.appendChild(element("h3", "Email draft"));
+        function field(labelText, value, tag, type, maxLength) {
+          const label = element("label", labelText);
+          const input = document.createElement(tag);
+          if (type) input.type = type;
+          input.value = value || "";
+          input.required = true;
+          input.maxLength = maxLength;
+          label.appendChild(input);
+          panel.appendChild(label);
+          return input;
+        }
+        const recipient = field("To — who should receive this?", draft.recipient, "input", "email", 254);
+        const subject = field("Subject", draft.subject, "input", "text", 200);
+        const body = field("Message", draft.body, "textarea", "", 12000);
+        const checks = [];
+        if (draft.available_attachments?.length) {
+          panel.appendChild(element("strong", "Attachments from this conversation"));
+          for (const report of draft.available_attachments) {
+            const label = element("label");
+            const check = document.createElement("input");
+            check.type = "checkbox";
+            check.value = report.report_id;
+            check.checked = draft.attachment_ids.includes(report.report_id);
+            label.append(check, document.createTextNode(report.filename));
+            panel.appendChild(label);
+            checks.push(check);
+          }
+        }
+        const status = element("p", "Review the draft and choose Preview email. Nothing is sent yet.", "mail-status");
+        const preview = element("button", "Preview email", "button");
+        preview.type = "submit";
+        panel.append(status, preview);
+        panel.addEventListener("submit", async event => {
+          event.preventDefault();
+          preview.disabled = true;
+          status.textContent = "Preparing your final preview…";
+          try {
+            const reviewed = await callApi("/web/email/" + draft.draft_id + "/preview", {
+              method: "POST", body: JSON.stringify({
+                recipient: recipient.value.trim(), subject: subject.value, body: body.value,
+                attachment_ids: checks.filter(check => check.checked).map(check => check.value),
+              }),
+            });
+            panel.remove();
+            renderEmailReview(message, reviewed);
+          } catch (error) {
+            status.textContent = error.message;
+            status.className = "mail-status error";
+          } finally { preview.disabled = false; }
+        });
+        message.appendChild(panel);
+        messages.scrollTop = messages.scrollHeight;
+      }
+
+      function renderEmailReview(message, draft) {
+        const panel = element("section", "", "mail-panel");
+        panel.appendChild(element("h3", "Review before sending"));
+        panel.appendChild(element("p", "From: " + identity.textContent));
+        panel.appendChild(element("p", "To: " + draft.recipient));
+        panel.appendChild(element("strong", draft.subject));
+        panel.appendChild(element("p", draft.body, "mail-body"));
+        panel.appendChild(element("strong", "Attachments (" + draft.attachments.length + ")"));
+        for (const file of draft.attachments) {
+          panel.appendChild(element("p", file.filename + " · " + (file.size_bytes / 1024).toFixed(1) + " KB"));
+        }
+        const status = element("p", "Click Send email to confirm this exact message and attachments. Google may ask you to grant Gmail permission.", "mail-status");
+        const controls = element("div", "", "mail-actions");
+        const edit = element("button", "Edit draft", "button secondary");
+        const send = element("button", "Send email", "button");
+        edit.type = send.type = "button";
+        edit.addEventListener("click", () => {
+          panel.remove();
+          renderEmailDraft(message, draft);
+        });
+        send.addEventListener("click", () => {
+          if (gmailBusy || !credential) return;
+          const signedInCredential = credential;
+          gmailBusy = true;
+          send.disabled = edit.disabled = true;
+          status.textContent = "Connect the same Google account to send this email…";
+          function fail(messageText) {
+            gmailBusy = false;
+            send.disabled = edit.disabled = false;
+            status.textContent = messageText;
+            status.className = "mail-status error";
+          }
+          try {
+            const tokenClient = google.accounts.oauth2.initTokenClient({
+              client_id: clientId,
+              scope: "openid email " + gmailScope,
+              hint: identity.textContent,
+              error_callback: () => fail("Gmail connection was cancelled or blocked. No send was requested."),
+              callback: async tokenResponse => {
+                if (tokenResponse.error || !tokenResponse.access_token ||
+                    !google.accounts.oauth2.hasGrantedAllScopes(tokenResponse, gmailScope)) {
+                  fail("Gmail sending permission was not granted. Nothing was sent.");
+                  return;
+                }
+                if (credential !== signedInCredential) {
+                  fail("Your sign-in changed. Review the draft after signing in again.");
+                  return;
+                }
+                status.textContent = "Sending your reviewed email…";
+                try {
+                  await callApi("/web/email/" + draft.draft_id + "/send", {
+                    method: "POST", body: JSON.stringify({
+                      review_token: draft.review_token, confirmed: true,
+                      access_token: tokenResponse.access_token,
+                    }),
+                  });
+                  status.textContent = "Sent to " + draft.recipient + ". You can find it in Gmail Sent.";
+                  status.className = "mail-status";
+                  controls.remove();
+                } catch (error) {
+                  status.textContent = error.message + " If the connection was lost, check Gmail Sent before trying again.";
+                  status.className = "mail-status error";
+                  edit.disabled = false;
+                  send.disabled = true;
+                } finally {
+                  tokenResponse.access_token = "";
+                  gmailBusy = false;
+                }
+              },
+            });
+            // Open directly from the click, not after awaiting a network call.
+            tokenClient.requestAccessToken();
+          } catch {
+            fail("Google's Gmail connection could not open. Refresh the page and try again.");
+          }
+        });
+        controls.append(edit, send);
+        panel.append(status, controls);
+        message.appendChild(panel);
+        messages.scrollTop = messages.scrollHeight;
+      }
+
+      async function sendMessage(text, sourceResultId = "") {
+        if (busy || !credential) return;
         addMessage("user", text);
-        promptInput.disabled = true;
-        sendButton.disabled = true;
+        setBusy(true);
         try {
           const payload = await callApi("/web/messages", {
             method: "POST",
-            body: JSON.stringify({ text }),
+            body: JSON.stringify({
+              text, conversation_id: conversationId, source_result_id: sourceResultId,
+            }),
           });
           const message = addMessage("agent", parseResponse(payload));
           addReportButtons(message, payload.reports);
+          addSuggestions(message, payload.suggested_questions, payload.result_id);
+          if (payload.email_draft) renderEmailDraft(message, payload.email_draft);
         } catch (error) {
           addMessage("error", error.message);
         } finally {
-          if (credential) {
-            promptInput.disabled = false;
-            sendButton.disabled = false;
-            promptInput.focus();
-          }
+          setBusy(false);
+          if (credential) promptInput.focus();
         }
       }
 

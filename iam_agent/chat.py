@@ -48,7 +48,7 @@ def _conversation_key(event: dict[str, Any], actor: ChatActor) -> str:
     return f"{space}:{thread}:{actor.principal.casefold()}"
 
 
-def _render(result: ChatWorkflowResult) -> str:
+def _render(result: ChatWorkflowResult, *, suggestions: bool = True) -> str:
     answer = result.answer
     sections = [answer.answer.strip()]
     if answer.key_findings:
@@ -57,7 +57,7 @@ def _render(result: ChatWorkflowResult) -> str:
         sections.append("Sources: " + ", ".join(f"`{source}`" for source in answer.sources))
     if answer.caveats:
         sections.append("Caveats:\n" + "\n".join(f"• {item}" for item in answer.caveats))
-    if answer.suggested_questions:
+    if suggestions and answer.suggested_questions:
         sections.append(
             "You can also ask:\n" + "\n".join(f"• {item}" for item in answer.suggested_questions)
         )
@@ -93,8 +93,15 @@ class GoogleChatHandler:
                 question=text,
                 conversation_key=_conversation_key(event, actor),
                 report_formats=requested_report_formats(text) if include_reports else [],
+                source_result_id=message.get("source_result_id", "") if include_reports else "",
+                allow_actions=include_reports,
             )
-            response: dict[str, Any] = {"text": _render(result)}
+            response: dict[str, Any] = {"text": _render(result, suggestions=not include_reports)}
+            if include_reports:
+                response["result_id"] = result.result_id
+                response["suggested_questions"] = result.answer.suggested_questions
+                if result.email_draft:
+                    response["email_draft"] = result.email_draft
             if include_reports and result.reports:
                 response["reports"] = [report.model_dump(mode="json") for report in result.reports]
             return response

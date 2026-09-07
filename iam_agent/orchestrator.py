@@ -87,6 +87,7 @@ class IAMOrchestrator:
                     "maximum_rows": self.settings.query_max_rows,
                     "maximum_lookback_days": self.settings.query_max_lookback_days,
                 }
+                rejection_reason = ""
                 for attempt in range(2):
                     stage = "query_planning"
                     try:

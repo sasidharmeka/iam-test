@@ -33,19 +33,27 @@ def records(concept, *, user="user12", fields=None):
 
 
 @pytest.mark.parametrize(
-    "question,topics",
+    "question,topics,domains",
     [
-        ("Which users are riskiest, and why?", {"risk", "risk_reasons"}),
-        ("tell me about user12", {"risk_scores", "identity_timelines"}),
-        ("Show authntication failures for user12", {"authentication"}),
-        ("Show failed MFA and stale access for user12", {"mfa_bypass", "stale_access"}),
+        ("Which users are riskiest, and why?", {"risk", "risk_reasons"}, {"identity_risk"}),
+        (
+            "tell me about user12",
+            {"risk_scores", "identity_timelines"},
+            {"identity_risk", "lifecycle_and_data_quality"},
+        ),
+        ("Show authntication failures for user12", {"authentication"}, {"authentication"}),
+        (
+            "Show failed MFA and stale access for user12",
+            {"mfa_bypass", "stale_access"},
+            {"authentication", "access_and_provisioning"},
+        ),
     ],
 )
-def test_catalog_retrieval_handles_screenshot_and_multi_topic_questions(question, topics):
+def test_catalog_retrieval_handles_screenshot_and_multi_topic_questions(question, topics, domains):
     retrieved = CatalogRetriever(CATALOG).retrieve(question)
     assert {item.topic for item in retrieved.requirements} == topics
     assert retrieved.requires_project_data
-    assert len(retrieved.candidate_domains) > 1
+    assert domains.issubset({domain.value for domain in retrieved.candidate_domains})
     for item in retrieved.requirements:
         assert set(item.concepts).issubset(retrieved.candidate_concepts)
 
